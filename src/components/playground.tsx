@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { validateSheetValue } from "@/lib/sheet-value-validation";
+
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Icons } from "@/components/icons";
 
@@ -83,18 +85,48 @@ type FormulaToken =
       relationPath?: string[];
     }
   | { kind: "operator"; operator: CalculationOperator };
-type CalculatedField = {
+type ArithmeticCalculatedField = {
   id: string;
+  kind?: "arithmetic";
   name: string;
   resultSheetId: string;
   relationIds: string[];
   formula: FormulaToken[];
 };
+type ConditionalOperator =
+  | "eq"
+  | "neq"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "isBlank"
+  | "isNotBlank";
+type ConditionalSumCondition = {
+  id: string;
+  column: string;
+  operator: ConditionalOperator;
+  operand:
+    | { kind: "literal"; value: string }
+    | { kind: "currentRowField"; column: string };
+};
+type ConditionalSumField = {
+  id: string;
+  kind: "conditionalSum";
+  name: string;
+  resultSheetId: string;
+  sourceSheetId: string;
+  relationPath: string[];
+  valueColumn: string;
+  conditions: ConditionalSumCondition[];
+};
+type CalculatedField = ArithmeticCalculatedField | ConditionalSumField;
 type CalculationDraft = {
   relationIds: string[];
   formula: FormulaToken[];
   name: string;
 };
+type ConditionalSumDraft = Omit<ConditionalSumField, "id" | "kind">;
 type NewColumnDraft = {
   name: string;
   type: ColumnType;
@@ -106,7 +138,54 @@ type BuilderPage = {
   items: CanvasItem[];
 };
 type CanvasView = { x: number; y: number; zoom: number };
+type ProjectSnapshot = {
+  pages: BuilderPage[];
+  activePageId: string;
+  canvasView: CanvasView;
+  sheets: Sheet[];
+  dataBinding: DataBindingConfig;
+  displayBindings: DisplayBindings;
+  sheetRelations: SheetRelation[];
+  calculatedFields: CalculatedField[];
+};
+type SavedProjectSnapshot = {
+  id: string;
+  projectVersion: number;
+  reason: "manual" | "before_restore";
+  createdAt: string;
+};
+type SheetDockMode = "normal" | "minimized" | "maximized";
 type ResizeDirection = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
+
+const projectHistoryLimit = 100;
+const projectHistoryInputDelay = 600;
+
+function isProjectSnapshot(value: unknown): value is ProjectSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const snapshot = value as Partial<ProjectSnapshot>;
+  return (
+    Array.isArray(snapshot.pages) &&
+    typeof snapshot.activePageId === "string" &&
+    !!snapshot.canvasView &&
+    Array.isArray(snapshot.sheets) &&
+    !!snapshot.dataBinding &&
+    !!snapshot.displayBindings &&
+    Array.isArray(snapshot.sheetRelations) &&
+    Array.isArray(snapshot.calculatedFields)
+  );
+}
+
+function savedSnapshotTime(createdAt: string) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(createdAt));
+}
 
 const groups: {
   title: string;
@@ -419,14 +498,6 @@ function parseNumericValue(value: string) {
   return normalized && Number.isFinite(number) ? number : null;
 }
 
-function numberInputValue(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  if (!/^-?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?$/.test(trimmed)) return "";
-  const normalized = trimmed.replaceAll(",", "");
-  return Number.isFinite(Number(normalized)) ? normalized : "";
-}
-
 function numericColumns(sheet: Sheet) {
   return sheet.columns.filter((_, columnIndex) => {
     const configuredType = sheet.columnTypes?.[columnIndex];
@@ -480,6 +551,16 @@ type ReachableSheet = {
   sheet: Sheet;
   relationPath: string[];
 };
+
+function isConditionalSumField(
+  field: CalculatedField,
+): field is ConditionalSumField {
+  return field.kind === "conditionalSum";
+}
+
+function calculatedFieldRelationIds(field: CalculatedField) {
+  return isConditionalSumField(field) ? field.relationPath : field.relationIds;
+}
 
 function relationAllowsSingleRowFrom(
   relation: SheetRelation,
@@ -539,6 +620,137 @@ function reachableSheetsFrom(
   return result;
 }
 
+function aggregateReachableSheetsFrom(
+  startSheet: Sheet,
+  relations: SheetRelation[],
+  sheets: Sheet[],
+) {
+  const result: ReachableSheet[] = [{ sheet: startSheet, relationPath: [] }];
+  const visited = new Set([startSheet.id]);
+  for (let index = 0; index < result.length; index++) {
+    const current = result[index];
+    relations.forEach((relation) => {
+      if (
+        relation.sourceSheetId !== current.sheet.id &&
+        relation.targetSheetId !== current.sheet.id
+      )
+        return;
+      const nextSheetId =
+        relation.sourceSheetId === current.sheet.id
+          ? relation.targetSheetId
+          : relation.sourceSheetId;
+      if (visited.has(nextSheetId)) return;
+      const nextSheet = sheets.find((sheet) => sheet.id === nextSheetId);
+      if (!nextSheet) return;
+      visited.add(nextSheetId);
+      result.push({
+        sheet: nextSheet,
+        relationPath: [...current.relationPath, relation.id],
+      });
+    });
+  }
+  return result;
+}
+
+function traverseRelatedRows(
+  startSheetId: string,
+  startRowId: string,
+  relationPath: string[],
+  relations: SheetRelation[],
+) {
+  let currentSheetId = startSheetId;
+  let currentRowIds = [startRowId];
+  for (const relationId of relationPath) {
+    const relation = relations.find((item) => item.id === relationId);
+    if (
+      !relation ||
+      (relation.sourceSheetId !== currentSheetId &&
+        relation.targetSheetId !== currentSheetId)
+    )
+      return { sheetId: currentSheetId, rowIds: [] };
+    const fromSource = relation.sourceSheetId === currentSheetId;
+    const rowIds = new Set(currentRowIds);
+    currentRowIds = [
+      ...new Set(
+        relation.links.flatMap((link) => {
+          const fromRowId = fromSource ? link.sourceRowId : link.targetRowId;
+          if (!rowIds.has(fromRowId)) return [];
+          return [fromSource ? link.targetRowId : link.sourceRowId];
+        }),
+      ),
+    ];
+    currentSheetId = fromSource
+      ? relation.targetSheetId
+      : relation.sourceSheetId;
+  }
+  return { sheetId: currentSheetId, rowIds: currentRowIds };
+}
+
+function compareConditionalValues(
+  left: string,
+  operator: ConditionalOperator,
+  right: string,
+) {
+  if (operator === "isBlank") return left.trim() === "";
+  if (operator === "isNotBlank") return left.trim() !== "";
+  const leftNumber = parseNumericValue(left);
+  const rightNumber = parseNumericValue(right);
+  const numeric = leftNumber !== null && rightNumber !== null;
+  const comparison = numeric
+    ? leftNumber - rightNumber
+    : left.localeCompare(right, "ko-KR", { sensitivity: "base" });
+  if (operator === "eq") return comparison === 0;
+  if (operator === "neq") return comparison !== 0;
+  if (operator === "gt") return comparison > 0;
+  if (operator === "gte") return comparison >= 0;
+  if (operator === "lt") return comparison < 0;
+  return comparison <= 0;
+}
+
+function calculateConditionalSum(
+  field: ConditionalSumField,
+  relations: SheetRelation[],
+  sheets: Sheet[],
+  resultRowId: string,
+) {
+  const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
+  const sourceSheet = sheets.find((sheet) => sheet.id === field.sourceSheetId);
+  if (!resultSheet || !sourceSheet) return "연결 없음";
+  const traversed = traverseRelatedRows(
+    field.resultSheetId,
+    resultRowId,
+    field.relationPath,
+    relations,
+  );
+  if (traversed.sheetId !== field.sourceSheetId) return "연결 없음";
+  const resultRowIndex = resultSheet.rowIds.indexOf(resultRowId);
+  let total = 0;
+  for (const rowId of traversed.rowIds) {
+    const rowIndex = sourceSheet.rowIds.indexOf(rowId);
+    const row = sourceSheet.rows[rowIndex];
+    if (!row) continue;
+    const matches = field.conditions.every((condition) => {
+      const left = row[sourceSheet.columns.indexOf(condition.column)] ?? "";
+      const right =
+        condition.operand.kind === "literal"
+          ? condition.operand.value
+          : (resultSheet.rows[resultRowIndex]?.[
+              resultSheet.columns.indexOf(condition.operand.column)
+            ] ?? "");
+      return compareConditionalValues(left, condition.operator, right);
+    });
+    if (!matches) continue;
+    const value = parseNumericValue(
+      row[sourceSheet.columns.indexOf(field.valueColumn)] ?? "",
+    );
+    if (value === null) return "숫자 필요";
+    total += value;
+  }
+  return new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 2 }).format(
+    total,
+  );
+}
+
 function relationPathLabel(
   startSheet: Sheet,
   relationPath: string[],
@@ -566,6 +778,8 @@ function calculateFieldValue(
   sheets: Sheet[],
   resultRowId: string,
 ) {
+  if (isConditionalSumField(field))
+    return calculateConditionalSum(field, relations, sheets, resultRowId);
   const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
   const values: number[] = [];
   const operators: CalculationOperator[] = [];
@@ -781,7 +995,9 @@ function RenderItem({
                         ? calculateFieldValue(
                             calculated,
                             sheetRelations.filter((relation) =>
-                              calculated.relationIds.includes(relation.id),
+                              calculatedFieldRelationIds(calculated).includes(
+                                relation.id,
+                              ),
                             ),
                             sheets,
                             sheet.rowIds[index],
@@ -1271,6 +1487,7 @@ export function Playground() {
   const [pages, setPages] = useState(initialPages);
   const [activePageId, setActivePageId] = useState("lca-page");
   const [selectedId, setSelectedId] = useState("table");
+  const [paletteOpen, setPaletteOpen] = useState(true);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [editingPageId, setEditingPageId] = useState<string | null>(null);
   const [pageNameDraft, setPageNameDraft] = useState("");
@@ -1280,6 +1497,9 @@ export function Playground() {
     zoom: 0.9,
   });
   const [sheets, setSheets] = useState(initialSheets);
+  const [cellValidationErrors, setCellValidationErrors] = useState<
+    Record<string, string>
+  >({});
   const [activeSheetId, setActiveSheetId] = useState("stg-source");
   const [editingSheetId, setEditingSheetId] = useState<string | null>(null);
   const [sheetNameDraft, setSheetNameDraft] = useState("");
@@ -1303,6 +1523,8 @@ export function Playground() {
   );
   const [calculationDraft, setCalculationDraft] =
     useState<CalculationDraft | null>(null);
+  const [conditionalSumDraft, setConditionalSumDraft] =
+    useState<ConditionalSumDraft | null>(null);
   const [propertyTab, setPropertyTab] = useState<"design" | "data" | "action">(
     "design",
   );
@@ -1324,7 +1546,31 @@ export function Playground() {
   const [hydrated, setHydrated] = useState(false);
   const skipInitialSaveRef = useRef(true);
   const [saveStatus, setSaveStatus] = useState("데이터베이스 연결 중");
+  const [snapshotPanelOpen, setSnapshotPanelOpen] = useState(false);
+  const [savedSnapshots, setSavedSnapshots] = useState<
+    SavedProjectSnapshot[]
+  >([]);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [snapshotError, setSnapshotError] = useState("");
+  const [restoringSnapshotId, setRestoringSnapshotId] = useState("");
+  const projectHistoryRef = useRef<ProjectSnapshot[]>([]);
+  const projectHistoryIndexRef = useRef(-1);
+  const applyingProjectHistoryRef = useRef(false);
+  const latestProjectSnapshotRef = useRef<ProjectSnapshot | null>(null);
+  const projectHistoryCommitTimeoutRef = useRef<number | null>(null);
+  const projectHistoryInteractionRef = useRef(false);
+  const [projectHistoryControls, setProjectHistoryControls] = useState({
+    canUndo: false,
+    canRedo: false,
+  });
+  const undoProjectRef = useRef<() => void>(() => undefined);
+  const redoProjectRef = useRef<() => void>(() => undefined);
   const [sheetDockHeight, setSheetDockHeight] = useState(235);
+  const [sheetDockMode, setSheetDockMode] =
+    useState<SheetDockMode>("normal");
+  const [sheetSearchOpen, setSheetSearchOpen] = useState(false);
+  const [sheetSearchQuery, setSheetSearchQuery] = useState("");
+  const normalSheetDockHeightRef = useRef(235);
   const nextId = useRef(1);
   const panRef = useRef<{
     startX: number;
@@ -1341,6 +1587,11 @@ export function Playground() {
     sheets.find((sheet) => sheet.id === activeSheetId) ??
     sheets[0] ??
     emptySheet;
+  const sheetSearchResults = sheets.filter((sheet) =>
+    sheet.name
+      .toLocaleLowerCase("ko-KR")
+      .includes(sheetSearchQuery.trim().toLocaleLowerCase("ko-KR")),
+  );
   const activeCalculatedFields = calculatedFields.filter(
     (field) => field.resultSheetId === activeSheet.id,
   );
@@ -1364,6 +1615,15 @@ export function Playground() {
   );
   const canCreateCalculation =
     reachableSheetPaths.length > 1 && calculableSheetPaths.length > 0;
+  const aggregateSheetPaths = aggregateReachableSheetsFrom(
+    activeSheet,
+    sheetRelations,
+    sheets,
+  ).filter(
+    ({ sheet, relationPath }) =>
+      relationPath.length > 0 && numericColumns(sheet).length > 0,
+  );
+  const canCreateConditionalSum = aggregateSheetPaths.length > 0;
   const canvasContentHeight = items.reduce((bottom, item, index) => {
     const position = itemPosition(item, index);
     return Math.max(
@@ -1371,6 +1631,187 @@ export function Playground() {
       position.y + (item.height ?? defaultItemHeight(item.kind)) + 40,
     );
   }, 460);
+
+  const updateProjectHistoryControls = useCallback(() => {
+    setProjectHistoryControls({
+      canUndo: projectHistoryIndexRef.current > 0,
+      canRedo:
+        projectHistoryIndexRef.current >= 0 &&
+        projectHistoryIndexRef.current < projectHistoryRef.current.length - 1,
+    });
+  }, []);
+
+  const clearProjectHistoryCommitTimeout = useCallback(() => {
+    if (projectHistoryCommitTimeoutRef.current === null) return;
+    window.clearTimeout(projectHistoryCommitTimeoutRef.current);
+    projectHistoryCommitTimeoutRef.current = null;
+  }, []);
+
+  const commitLatestProjectSnapshot = useCallback(() => {
+    clearProjectHistoryCommitTimeout();
+    const snapshot = latestProjectSnapshotRef.current;
+    if (!snapshot) return;
+    const currentSnapshot =
+      projectHistoryRef.current[projectHistoryIndexRef.current];
+    if (
+      currentSnapshot &&
+      JSON.stringify(currentSnapshot) === JSON.stringify(snapshot)
+    )
+      return;
+    const nextHistory = [
+      ...projectHistoryRef.current.slice(
+        0,
+        projectHistoryIndexRef.current + 1,
+      ),
+      structuredClone(snapshot),
+    ].slice(-projectHistoryLimit);
+    projectHistoryRef.current = nextHistory;
+    projectHistoryIndexRef.current = nextHistory.length - 1;
+    updateProjectHistoryControls();
+  }, [clearProjectHistoryCommitTimeout, updateProjectHistoryControls]);
+
+  const queueProjectHistoryCommit = useCallback(
+    (delay = projectHistoryInputDelay) => {
+      clearProjectHistoryCommitTimeout();
+      projectHistoryCommitTimeoutRef.current = window.setTimeout(() => {
+        projectHistoryCommitTimeoutRef.current = null;
+        commitLatestProjectSnapshot();
+      }, delay);
+    },
+    [clearProjectHistoryCommitTimeout, commitLatestProjectSnapshot],
+  );
+
+  function beginProjectHistoryInteraction() {
+    commitLatestProjectSnapshot();
+    projectHistoryInteractionRef.current = true;
+  }
+
+  function endProjectHistoryInteraction() {
+    projectHistoryInteractionRef.current = false;
+    queueProjectHistoryCommit(0);
+  }
+
+  function applyProjectSnapshot(snapshot: ProjectSnapshot) {
+    clearProjectHistoryCommitTimeout();
+    applyingProjectHistoryRef.current = true;
+    latestProjectSnapshotRef.current = structuredClone(snapshot);
+    setPages(snapshot.pages);
+    setActivePageId(snapshot.activePageId);
+    setCanvasView(snapshot.canvasView);
+    setSheets(snapshot.sheets);
+    setDataBinding(snapshot.dataBinding);
+    setDisplayBindings(snapshot.displayBindings);
+    setSheetRelations(snapshot.sheetRelations);
+    setCalculatedFields(snapshot.calculatedFields);
+  }
+
+  function moveProjectHistory(offset: -1 | 1) {
+    commitLatestProjectSnapshot();
+    const nextIndex = projectHistoryIndexRef.current + offset;
+    const snapshot = projectHistoryRef.current[nextIndex];
+    if (!snapshot) return;
+    projectHistoryIndexRef.current = nextIndex;
+    applyProjectSnapshot(structuredClone(snapshot));
+    updateProjectHistoryControls();
+  }
+
+  function undoProject() {
+    moveProjectHistory(-1);
+  }
+
+  function redoProject() {
+    moveProjectHistory(1);
+  }
+
+  function currentProjectDocument() {
+    return {
+      schemaVersion: 8,
+      pages,
+      activePageId,
+      canvasView,
+      sheets,
+      dataBinding,
+      displayBindings,
+      sheetRelations,
+      calculatedFields,
+    };
+  }
+
+  async function loadSavedSnapshots() {
+    const response = await fetch("/api/projects/demo/snapshots", {
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("스냅샷 기록을 불러오지 못했습니다.");
+    const payload = (await response.json()) as {
+      snapshots?: SavedProjectSnapshot[];
+    };
+    setSavedSnapshots(payload.snapshots ?? []);
+  }
+
+  async function saveProjectSnapshot() {
+    commitLatestProjectSnapshot();
+    setSnapshotPanelOpen(true);
+    setSnapshotLoading(true);
+    setSnapshotError("");
+    setSaveStatus("프로젝트와 스냅샷 저장 중");
+    try {
+      const response = await fetch("/api/projects/demo/snapshots", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document: currentProjectDocument() }),
+      });
+      if (!response.ok) throw new Error("스냅샷을 저장하지 못했습니다.");
+      await loadSavedSnapshots();
+      setSaveStatus("프로젝트와 스냅샷 저장됨");
+    } catch (error) {
+      setSnapshotError(
+        error instanceof Error ? error.message : "스냅샷 저장에 실패했습니다.",
+      );
+      setSaveStatus("스냅샷 저장 실패 · 다시 시도하세요");
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }
+
+  async function restoreSavedSnapshot(snapshot: SavedProjectSnapshot) {
+    if (
+      !window.confirm(
+        `${savedSnapshotTime(snapshot.createdAt)} 스냅샷으로 되돌릴까요? 현재 상태도 복원 전 스냅샷으로 보관됩니다.`,
+      )
+    )
+      return;
+    setRestoringSnapshotId(snapshot.id);
+    setSnapshotError("");
+    setSaveStatus("스냅샷 복원 중");
+    try {
+      const response = await fetch(
+        `/api/projects/demo/snapshots/${snapshot.id}`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error("스냅샷을 복원하지 못했습니다.");
+      const payload = (await response.json()) as {
+        project?: { document?: unknown };
+      };
+      if (!isProjectSnapshot(payload.project?.document))
+        throw new Error("복원할 프로젝트 문서가 올바르지 않습니다.");
+      applyProjectSnapshot(structuredClone(payload.project.document));
+      commitLatestProjectSnapshot();
+      await loadSavedSnapshots();
+      setSaveStatus("스냅샷에서 복원됨");
+    } catch (error) {
+      setSnapshotError(
+        error instanceof Error ? error.message : "스냅샷 복원에 실패했습니다.",
+      );
+      setSaveStatus("스냅샷 복원 실패 · 다시 시도하세요");
+    } finally {
+      setRestoringSnapshotId("");
+    }
+  }
+
+  useEffect(() => {
+    undoProjectRef.current = undoProject;
+    redoProjectRef.current = redoProject;
+  });
 
   function setItems(
     updater: CanvasItem[] | ((current: CanvasItem[]) => CanvasItem[]),
@@ -1452,7 +1893,7 @@ export function Playground() {
       .then((payload) => {
         if (cancelled) return;
         const document = payload.project?.document;
-        const hasCurrentDataModel = document?.schemaVersion === 7;
+        const hasCurrentDataModel = (document?.schemaVersion ?? 0) >= 7;
         if (Array.isArray(document?.pages) && document.pages.length > 0)
           setPages(document.pages);
         else if (Array.isArray(document?.items) && document.items.length > 0)
@@ -1480,8 +1921,11 @@ export function Playground() {
           setCalculatedFields(
             document.calculatedFields.filter(
               (field) =>
-                Array.isArray(field.formula) &&
-                Array.isArray(field.relationIds),
+                isConditionalSumField(field)
+                  ? Array.isArray(field.relationPath) &&
+                    Array.isArray(field.conditions)
+                  : Array.isArray(field.formula) &&
+                    Array.isArray(field.relationIds),
             ),
           );
         setSaveStatus("PostgreSQL에서 불러옴");
@@ -1499,6 +1943,67 @@ export function Playground() {
 
   useEffect(() => {
     if (!hydrated) return;
+    const snapshot: ProjectSnapshot = {
+      pages,
+      activePageId,
+      canvasView,
+      sheets,
+      dataBinding,
+      displayBindings,
+      sheetRelations,
+      calculatedFields,
+    };
+    latestProjectSnapshotRef.current = structuredClone(snapshot);
+    if (applyingProjectHistoryRef.current) {
+      applyingProjectHistoryRef.current = false;
+      return;
+    }
+    if (projectHistoryRef.current.length === 0) {
+      commitLatestProjectSnapshot();
+      return;
+    }
+    if (projectHistoryInteractionRef.current) return;
+    queueProjectHistoryCommit();
+  }, [
+    activePageId,
+    calculatedFields,
+    canvasView,
+    dataBinding,
+    displayBindings,
+    hydrated,
+    pages,
+    sheetRelations,
+    sheets,
+    commitLatestProjectSnapshot,
+    queueProjectHistoryCommit,
+  ]);
+
+  useEffect(
+    () => () => {
+      clearProjectHistoryCommitTimeout();
+    },
+    [clearProjectHistoryCommitTimeout],
+  );
+
+  useEffect(() => {
+    if (!hydrated) return;
+    function handleHistoryShortcut(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const undo = key === "z" && !event.shiftKey;
+      const redo =
+        (key === "z" && event.shiftKey) || (key === "y" && !event.shiftKey);
+      if (!undo && !redo) return;
+      event.preventDefault();
+      if (undo) undoProjectRef.current();
+      else redoProjectRef.current();
+    }
+    window.addEventListener("keydown", handleHistoryShortcut);
+    return () => window.removeEventListener("keydown", handleHistoryShortcut);
+  }, [hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
     if (skipInitialSaveRef.current) {
       skipInitialSaveRef.current = false;
       return;
@@ -1510,7 +2015,7 @@ export function Playground() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           document: {
-            schemaVersion: 7,
+            schemaVersion: 8,
             pages,
             activePageId,
             canvasView,
@@ -1591,6 +2096,22 @@ export function Playground() {
     document.addEventListener("pointerdown", closeFieldMenu);
     return () => document.removeEventListener("pointerdown", closeFieldMenu);
   }, [fieldMenuOpen]);
+
+  useEffect(() => {
+    if (!sheetSearchOpen) return;
+    function closeSheetSearch(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(
+          ".sheet-search-popover, [aria-label='데이터 시트 검색']",
+        )
+      )
+        return;
+      setSheetSearchOpen(false);
+    }
+    document.addEventListener("pointerdown", closeSheetSearch);
+    return () => document.removeEventListener("pointerdown", closeSheetSearch);
+  }, [sheetSearchOpen]);
 
   function addItem(kind: ComponentKind) {
     const source = groups
@@ -1738,10 +2259,13 @@ export function Playground() {
       current.filter(
         (field) =>
           field.resultSheetId !== sheetToDelete.id &&
-          !field.formula.some(
-            (token) =>
-              token.kind === "field" && token.sheetId === sheetToDelete.id,
-          ),
+          (isConditionalSumField(field)
+            ? field.sourceSheetId !== sheetToDelete.id
+            : !field.formula.some(
+                (token) =>
+                  token.kind === "field" &&
+                  token.sheetId === sheetToDelete.id,
+              )),
       ),
     );
     setDataBinding((current) => {
@@ -1773,10 +2297,25 @@ export function Playground() {
   }
 
   function updateCell(rowIndex: number, columnIndex: number, value: string) {
-    const nextValue =
-      activeSheet.columnTypes?.[columnIndex] === "number"
-        ? numberInputValue(value)
-        : value;
+    const rowId = activeSheet.rowIds[rowIndex] ?? String(rowIndex);
+    const errorKey = `${activeSheet.id}:${rowId}:${columnIndex}`;
+    const result = validateSheetValue(
+      columnType(activeSheet, columnIndex),
+      value,
+    );
+    if (!result.valid) {
+      setCellValidationErrors((current) => ({
+        ...current,
+        [errorKey]: result.message,
+      }));
+      return;
+    }
+    setCellValidationErrors((current) => {
+      if (!(errorKey in current)) return current;
+      const next = { ...current };
+      delete next[errorKey];
+      return next;
+    });
     setSheets((current) =>
       current.map((sheet) =>
         sheet.id !== activeSheet.id
@@ -1787,12 +2326,21 @@ export function Playground() {
                 index !== rowIndex
                   ? row
                   : row.map((cell, cellIndex) =>
-                      cellIndex === columnIndex ? nextValue : cell,
+                      cellIndex === columnIndex ? result.value : cell,
                     ),
               ),
             },
       ),
     );
+  }
+
+  function clearCellValidationError(errorKey: string) {
+    setCellValidationErrors((current) => {
+      if (!(errorKey in current)) return current;
+      const next = { ...current };
+      delete next[errorKey];
+      return next;
+    });
   }
 
   function addRow() {
@@ -2001,13 +2549,28 @@ export function Playground() {
     );
     setCalculatedFields((current) =>
       current.filter(
-        (field) =>
-          !field.formula.some(
+        (field) => {
+          if (isConditionalSumField(field))
+            return !(
+              (field.sourceSheetId === activeSheet.id &&
+                (field.valueColumn === column ||
+                  field.conditions.some(
+                    (condition) => condition.column === column,
+                  ))) ||
+              (field.resultSheetId === activeSheet.id &&
+                field.conditions.some(
+                  (condition) =>
+                    condition.operand.kind === "currentRowField" &&
+                    condition.operand.column === column,
+                ))
+            );
+          return !field.formula.some(
             (token) =>
               token.kind === "field" &&
               token.sheetId === activeSheet.id &&
               token.column === column,
-          ),
+          );
+        },
       ),
     );
     setEditingColumnIndex(null);
@@ -2084,6 +2647,63 @@ export function Playground() {
       ],
       name: `${firstField.sheet.name}·${secondField.sheet.name} 계산`,
     });
+  }
+
+  function selectConditionalSumSource(sheetId: string) {
+    const target = aggregateSheetPaths.find(({ sheet }) => sheet.id === sheetId);
+    if (!target) return;
+    const valueColumn = numericColumns(target.sheet)[0] ?? "";
+    setConditionalSumDraft((current) =>
+      current && {
+        ...current,
+        sourceSheetId: target.sheet.id,
+        relationPath: target.relationPath,
+        valueColumn,
+        conditions: [
+          {
+            id: crypto.randomUUID(),
+            column: target.sheet.columns[0] ?? "",
+            operator: "eq",
+            operand: { kind: "literal", value: "" },
+          },
+        ],
+      },
+    );
+  }
+
+  function addConditionalSumCondition() {
+    const source = sheets.find(
+      (sheet) => sheet.id === conditionalSumDraft?.sourceSheetId,
+    );
+    if (!source) return;
+    setConditionalSumDraft((current) =>
+      current && {
+        ...current,
+        conditions: [
+          ...current.conditions,
+          {
+            id: crypto.randomUUID(),
+            column: source.columns[0] ?? "",
+            operator: "eq",
+            operand: { kind: "literal", value: "" },
+          },
+        ],
+      },
+    );
+  }
+
+  function saveConditionalSum() {
+    if (!conditionalSumDraft?.name.trim()) return;
+    setCalculatedFields((current) => [
+      ...current,
+      {
+        ...conditionalSumDraft,
+        id: crypto.randomUUID(),
+        kind: "conditionalSum",
+        name: conditionalSumDraft.name.trim(),
+      },
+    ]);
+    setConditionalSumDraft(null);
   }
 
   function appendFormulaOperator(operator: CalculationOperator) {
@@ -2276,7 +2896,11 @@ export function Playground() {
   }
 
   function startPan(event: React.PointerEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest(".web-canvas")) return;
+    if (
+      event.button !== 0 ||
+      (event.target as HTMLElement).closest(".canvas-ui-item")
+    )
+      return;
     pannedCanvasRef.current = false;
     panRef.current = {
       startX: event.clientX,
@@ -2326,9 +2950,54 @@ export function Playground() {
     setPropertiesOpen(false);
   }
 
+  function clearPageSelection(event: React.MouseEvent<HTMLElement>) {
+    event.stopPropagation();
+    clearCanvasSelection();
+  }
+
   function resizeSheetDock(nextHeight: number) {
     const maxHeight = Math.max(260, window.innerHeight - 210);
-    setSheetDockHeight(Math.min(maxHeight, Math.max(150, nextHeight)));
+    const height = Math.min(maxHeight, Math.max(150, nextHeight));
+    normalSheetDockHeightRef.current = height;
+    setSheetDockHeight(height);
+  }
+
+  function toggleSheetDockMinimized() {
+    setSheetSearchOpen(false);
+    if (sheetDockMode === "minimized") {
+      setSheetDockHeight(normalSheetDockHeightRef.current);
+      setSheetDockMode("normal");
+      return;
+    }
+    if (sheetDockMode === "normal")
+      normalSheetDockHeightRef.current = sheetDockHeight;
+    setSheetDockMode("minimized");
+  }
+
+  function toggleSheetDockMaximized() {
+    setSheetSearchOpen(false);
+    if (sheetDockMode === "maximized") {
+      setSheetDockHeight(normalSheetDockHeightRef.current);
+      setSheetDockMode("normal");
+      return;
+    }
+    if (sheetDockMode === "normal")
+      normalSheetDockHeightRef.current = sheetDockHeight;
+    setSheetDockMode("maximized");
+  }
+
+  function toggleSheetSearch() {
+    if (sheetDockMode === "minimized") {
+      setSheetDockHeight(normalSheetDockHeightRef.current);
+      setSheetDockMode("normal");
+    }
+    setSheetSearchOpen((current) => !current);
+  }
+
+  function selectSearchedSheet(sheetId: string) {
+    setActiveSheetId(sheetId);
+    setSheetSearchQuery("");
+    setSheetSearchOpen(false);
   }
 
   function startSheetDockResize(event: React.PointerEvent<HTMLDivElement>) {
@@ -2360,6 +3029,7 @@ export function Playground() {
     event.stopPropagation();
     const target = event.currentTarget.closest(".canvas-ui-item");
     if (!target) return;
+    beginProjectHistoryInteraction();
     const rect = target.getBoundingClientRect();
     const startX = event.clientX;
     const startY = event.clientY;
@@ -2418,6 +3088,7 @@ export function Playground() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
       window.removeEventListener("pointercancel", onEnd);
+      endProjectHistoryInteraction();
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd);
@@ -2435,6 +3106,7 @@ export function Playground() {
       return;
     event.preventDefault();
     event.stopPropagation();
+    beginProjectHistoryInteraction();
     movedItemRef.current = false;
     const index = items.findIndex((candidate) => candidate.id === item.id);
     const origin = itemPosition(item, index);
@@ -2472,6 +3144,7 @@ export function Playground() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onEnd);
       window.removeEventListener("pointercancel", onEnd);
+      endProjectHistoryInteraction();
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onEnd);
@@ -2480,9 +3153,14 @@ export function Playground() {
 
   return (
     <div
-      className="studio ui-studio"
+      className={`studio ui-studio sheet-dock-${sheetDockMode}`}
       style={{
-        gridTemplateRows: `62px minmax(180px, 1fr) ${sheetDockHeight}px`,
+        gridTemplateRows:
+          sheetDockMode === "minimized"
+            ? "62px minmax(0, 1fr) 38px"
+            : sheetDockMode === "maximized"
+              ? "62px 0 minmax(0, 1fr)"
+              : `62px minmax(180px, 1fr) ${sheetDockHeight}px`,
       }}
     >
       <header className="studio-topbar">
@@ -2491,20 +3169,107 @@ export function Playground() {
           <span>초안</span>
         </div>
         <div className="studio-actions">
+          <div
+            className="project-history-actions"
+            aria-label="프로젝트 편집 기록"
+          >
+            <button
+              className="button secondary compact history-button"
+              type="button"
+              onClick={undoProject}
+              disabled={!projectHistoryControls.canUndo}
+              aria-label="이전 편집으로 돌아가기"
+              title="이전 편집으로 돌아가기 (⌘Z / Ctrl+Z)"
+            >
+              이전
+            </button>
+            <button
+              className="button secondary compact history-button"
+              type="button"
+              onClick={redoProject}
+              disabled={!projectHistoryControls.canRedo}
+              aria-label="다시 앞으로 가기"
+              title="다시 앞으로 가기 (⇧⌘Z / Ctrl+Y)"
+            >
+              다시 앞으로
+            </button>
+          </div>
           <span className="saved">
             <Icons.check />
             {saveStatus}
           </span>
-          <button className="button secondary compact">미리보기</button>
-          <button className="button primary compact">
-            <Icons.play />
-            게시
+          <button
+            className="button primary compact snapshot-trigger"
+            type="button"
+            onClick={saveProjectSnapshot}
+            disabled={snapshotLoading || !!restoringSnapshotId}
+            title="현재 프로젝트를 저장하고 스냅샷 기록 남기기"
+          >
+            <Icons.clock />
+            {snapshotLoading ? "저장 중" : "스냅샷"}
           </button>
         </div>
       </header>
 
+      {snapshotPanelOpen && (
+        <aside className="snapshot-panel" aria-label="프로젝트 스냅샷 기록">
+          <header>
+            <div>
+              <span>PROJECT HISTORY</span>
+              <h2>스냅샷 기록</h2>
+              <p>저장한 시점의 프로젝트로 언제든 되돌아갈 수 있습니다.</p>
+            </div>
+            <button
+              type="button"
+              aria-label="스냅샷 기록 닫기"
+              onClick={() => setSnapshotPanelOpen(false)}
+            >
+              ×
+            </button>
+          </header>
+          {snapshotError && <p className="snapshot-error">{snapshotError}</p>}
+          <div className="snapshot-list">
+            {snapshotLoading && savedSnapshots.length === 0 ? (
+              <p className="snapshot-empty">스냅샷을 저장하고 있습니다.</p>
+            ) : savedSnapshots.length === 0 ? (
+              <p className="snapshot-empty">아직 저장된 스냅샷이 없습니다.</p>
+            ) : (
+              savedSnapshots.map((snapshot, index) => (
+                <article key={snapshot.id} className="snapshot-record">
+                  <div className="snapshot-record-icon">
+                    <Icons.clock />
+                  </div>
+                  <div>
+                    <strong>
+                      {snapshot.reason === "before_restore"
+                        ? "복원 전 자동 저장"
+                        : index === 0
+                          ? "최신 스냅샷"
+                          : "프로젝트 저장"}
+                    </strong>
+                    <time dateTime={snapshot.createdAt}>
+                      {savedSnapshotTime(snapshot.createdAt)}
+                    </time>
+                    <small>프로젝트 버전 {snapshot.projectVersion}</small>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => restoreSavedSnapshot(snapshot)}
+                    disabled={!!restoringSnapshotId || snapshotLoading}
+                  >
+                    {restoringSnapshotId === snapshot.id
+                      ? "복원 중"
+                      : "이 시점으로 복원"}
+                  </button>
+                </article>
+              ))
+            )}
+          </div>
+        </aside>
+      )}
+
       <div
-        className={`ui-builder-body ${propertiesOpen ? "" : "properties-closed"}`}
+        className={`ui-builder-body ${paletteOpen ? "" : "palette-closed"} ${propertiesOpen ? "" : "properties-closed"}`}
       >
         <aside className="ui-palette">
           <div className="panel-heading">
@@ -2512,6 +3277,14 @@ export function Playground() {
               <h2>컴포넌트</h2>
               <p>화면에 필요한 요소를 끌어다 놓으세요</p>
             </div>
+            <button
+              type="button"
+              aria-label="컴포넌트 패널 숨기기"
+              title="컴포넌트 패널 숨기기"
+              onClick={() => setPaletteOpen(false)}
+            >
+              ×
+            </button>
           </div>
           <label className="palette-search">
             <Icons.search />
@@ -2559,6 +3332,17 @@ export function Playground() {
             )
           }
         >
+          {!paletteOpen && (
+            <button
+              type="button"
+              className="palette-reopen"
+              aria-label="컴포넌트 패널 열기"
+              onClick={() => setPaletteOpen(true)}
+            >
+              <Icons.blocks />
+              컴포넌트
+            </button>
+          )}
           <div className="workspace-bar">
             <div className="page-switcher">
               <span>페이지</span>
@@ -2656,10 +3440,7 @@ export function Playground() {
                   <section className="mock-page">
                     <div
                       className="mock-content"
-                      onClick={() => {
-                        setSelectedId("");
-                        setPropertiesOpen(false);
-                      }}
+                      onClick={clearPageSelection}
                     >
                       <div
                         className="mock-layout"
@@ -2942,7 +3723,10 @@ export function Playground() {
           </aside>
         )}
       </div>
-      <section className="sheet-dock" aria-label="데이터 시트">
+      <section
+        className={`sheet-dock ${sheetDockMode}`}
+        aria-label="데이터 시트"
+      >
         <div
           role="separator"
           tabIndex={0}
@@ -2970,6 +3754,45 @@ export function Playground() {
           <div className="sheet-title">
             <Icons.database />
             <strong>데이터</strong>
+            <div className="sheet-window-controls">
+              <button
+                type="button"
+                aria-label={
+                  sheetDockMode === "minimized"
+                    ? "데이터 시트 원래 크기로 복원"
+                    : "데이터 시트 최소화"
+                }
+                title={
+                  sheetDockMode === "minimized" ? "원래 크기" : "최소화"
+                }
+                onClick={toggleSheetDockMinimized}
+              >
+                _
+              </button>
+              <button
+                type="button"
+                aria-label={
+                  sheetDockMode === "maximized"
+                    ? "데이터 시트 원래 크기로 복원"
+                    : "데이터 시트 최대화"
+                }
+                title={
+                  sheetDockMode === "maximized" ? "원래 크기" : "최대화"
+                }
+                onClick={toggleSheetDockMaximized}
+              >
+                {sheetDockMode === "maximized" ? "❐" : "□"}
+              </button>
+              <button
+                type="button"
+                aria-label="데이터 시트 검색"
+                title="시트 검색"
+                aria-expanded={sheetSearchOpen}
+                onClick={toggleSheetSearch}
+              >
+                <Icons.search />
+              </button>
+            </div>
           </div>
           {sheets.map((sheet) => (
             <div
@@ -3047,6 +3870,45 @@ export function Playground() {
           </button>
           <span className="sheet-summary">테이블 {sheets.length}개</span>
         </div>
+        {sheetSearchOpen && (
+          <div
+            className="sheet-search-popover"
+            role="dialog"
+            aria-label="시트 찾기"
+          >
+            <label>
+              <Icons.search />
+              <input
+                autoFocus
+                aria-label="시트 이름 검색"
+                placeholder="시트 이름 검색"
+                value={sheetSearchQuery}
+                onChange={(event) => setSheetSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setSheetSearchOpen(false);
+                }}
+              />
+            </label>
+            <div className="sheet-search-results">
+              {sheetSearchResults.length === 0 ? (
+                <p>일치하는 시트가 없습니다.</p>
+              ) : (
+                sheetSearchResults.map((sheet) => (
+                  <button
+                    key={sheet.id}
+                    type="button"
+                    className={sheet.id === activeSheet.id ? "active" : ""}
+                    onClick={() => selectSearchedSheet(sheet.id)}
+                  >
+                    <span className="table-dot" />
+                    <strong>{sheet.name}</strong>
+                    <small>{sheet.rows.length}개 행</small>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
         {sheets.length === 0 ? (
           <div className="empty-sheet-state">
             <Icons.database />
@@ -3179,6 +4041,39 @@ export function Playground() {
                           </button>
                           <button
                             role="menuitem"
+                            disabled={!canCreateConditionalSum}
+                            onClick={() => {
+                              const target = aggregateSheetPaths[0]!;
+                              setConditionalSumDraft({
+                                name: `${target.sheet.name} 조건부 합계`,
+                                resultSheetId: activeSheet.id,
+                                sourceSheetId: target.sheet.id,
+                                relationPath: target.relationPath,
+                                valueColumn: numericColumns(target.sheet)[0]!,
+                                conditions: [
+                                  {
+                                    id: crypto.randomUUID(),
+                                    column: target.sheet.columns[0]!,
+                                    operator: "eq",
+                                    operand: { kind: "literal", value: "" },
+                                  },
+                                ],
+                              });
+                              setFieldMenuOpen(false);
+                            }}
+                          >
+                            <span className="field-menu-icon fx">∑</span>
+                            <span>
+                              <strong>조건부 합계</strong>
+                              <small>
+                                {canCreateConditionalSum
+                                  ? "관계로 연결된 여러 행에 업무 조건을 적용해 합산해요"
+                                  : "먼저 숫자 필드가 있는 시트와 관계를 만들어주세요"}
+                              </small>
+                            </span>
+                          </button>
+                          <button
+                            role="menuitem"
                             disabled={!canCreateCalculation}
                             onClick={() => {
                               setFieldMenuOpen(false);
@@ -3214,12 +4109,21 @@ export function Playground() {
                       }
                     >
                       <th className="row-number">{rowIndex + 1}</th>
-                      {activeSheet.columns.map((column, columnIndex) => (
-                        <td key={column}>
+                      {activeSheet.columns.map((column, columnIndex) => {
+                        const rowId =
+                          activeSheet.rowIds[rowIndex] ?? String(rowIndex);
+                        const errorKey = `${activeSheet.id}:${rowId}:${columnIndex}`;
+                        const validationError = cellValidationErrors[errorKey];
+                        const errorId = `cell-error-${rowId}-${columnIndex}`;
+                        return (
+                        <td key={column} className={validationError ? "invalid-cell" : undefined}>
                           {activeSheet.columnTypes?.[columnIndex] ===
                           "boolean" ? (
                             <select
                               aria-label={`${rowIndex + 1}행 ${column}`}
+                              aria-invalid={validationError ? true : undefined}
+                              aria-describedby={validationError ? errorId : undefined}
+                              onFocus={() => clearCellValidationError(errorKey)}
                               value={row[columnIndex] || "아니오"}
                               onChange={(event) =>
                                 updateCell(
@@ -3235,19 +4139,15 @@ export function Playground() {
                           ) : (
                             <input
                               type={
-                                activeSheet.columnTypes?.[columnIndex] ===
-                                "number"
-                                  ? "number"
-                                  : activeSheet.columnTypes?.[columnIndex] ===
-                                      "date"
-                                    ? "date"
-                                    : "text"
+                                "text"
                               }
                               aria-label={`${rowIndex + 1}행 ${column}`}
-                              step={
-                                activeSheet.columnTypes?.[columnIndex] ===
-                                "number"
-                                  ? "any"
+                              aria-invalid={validationError ? true : undefined}
+                              aria-describedby={validationError ? errorId : undefined}
+                              onFocus={() => clearCellValidationError(errorKey)}
+                              placeholder={
+                                activeSheet.columnTypes?.[columnIndex] === "date"
+                                  ? "YYYY-MM-DD"
                                   : undefined
                               }
                               inputMode={
@@ -3257,10 +4157,7 @@ export function Playground() {
                                   : undefined
                               }
                               value={
-                                activeSheet.columnTypes?.[columnIndex] ===
-                                "number"
-                                  ? numberInputValue(row[columnIndex] ?? "")
-                                  : (row[columnIndex] ?? "")
+                                row[columnIndex] ?? ""
                               }
                               onChange={(event) =>
                                 updateCell(
@@ -3271,11 +4168,17 @@ export function Playground() {
                               }
                             />
                           )}
+                          {validationError && (
+                            <small id={errorId} className="cell-validation-error" role="alert">
+                              {validationError}
+                            </small>
+                          )}
                         </td>
-                      ))}
+                        );
+                      })}
                       {activeCalculatedFields.map((field) => {
                         const relations = sheetRelations.filter((item) =>
-                          field.relationIds.includes(item.id),
+                          calculatedFieldRelationIds(field).includes(item.id),
                         );
                         return (
                           <td key={field.id} className="calculated-cell">
@@ -3431,6 +4334,343 @@ export function Playground() {
           </form>
         </div>
       )}
+      {conditionalSumDraft &&
+        (() => {
+          const sourceSheet = sheets.find(
+            (sheet) => sheet.id === conditionalSumDraft.sourceSheetId,
+          ) ?? emptySheet;
+          const previewField: ConditionalSumField = {
+            ...conditionalSumDraft,
+            id: "conditional-sum-preview",
+            kind: "conditionalSum",
+          };
+          const previewRelations = sheetRelations.filter((relation) =>
+            conditionalSumDraft.relationPath.includes(relation.id),
+          );
+          const preview = activeSheet.rowIds.slice(0, 5).map((rowId, index) => ({
+            rowId,
+            label: activeSheet.rows[index]?.[0] ?? `${index + 1}번 데이터`,
+            value: calculateConditionalSum(
+              previewField,
+              previewRelations,
+              sheets,
+              rowId,
+            ),
+          }));
+          return (
+            <div
+              className="relation-modal-backdrop"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget)
+                  setConditionalSumDraft(null);
+              }}
+            >
+              <div
+                className="relation-modal calculation-modal conditional-sum-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label="조건부 합계 만들기"
+              >
+                <header>
+                  <div>
+                    <span className="fx-badge">∑</span>
+                    <strong>조건부 합계 만들기</strong>
+                  </div>
+                  <button
+                    aria-label="조건부 합계 닫기"
+                    onClick={() => setConditionalSumDraft(null)}
+                  >
+                    ×
+                  </button>
+                </header>
+                <section>
+                  <small>1단계 · 대상 데이터</small>
+                  <h2>어떤 데이터를 합산할까요?</h2>
+                  <div className="conditional-sum-grid">
+                    <label>
+                      관계로 연결된 시트
+                      <select
+                        aria-label="조건부 합계 대상 시트"
+                        value={conditionalSumDraft.sourceSheetId}
+                        onChange={(event) =>
+                          selectConditionalSumSource(event.target.value)
+                        }
+                      >
+                        {aggregateSheetPaths.map(({ sheet, relationPath }) => (
+                          <option key={sheet.id} value={sheet.id}>
+                            {relationPathLabel(
+                              activeSheet,
+                              relationPath,
+                              sheetRelations,
+                              sheets,
+                            )}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      더할 숫자 필드
+                      <select
+                        aria-label="합산할 숫자 필드"
+                        value={conditionalSumDraft.valueColumn}
+                        onChange={(event) =>
+                          setConditionalSumDraft((current) =>
+                            current && {
+                              ...current,
+                              valueColumn: event.target.value,
+                            },
+                          )
+                        }
+                      >
+                        {numericColumns(sourceSheet).map((column) => (
+                          <option key={column}>{column}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <p className="formula-help">
+                    현재 {activeSheet.name}의 각 행에서 관계를 따라 연결된 {" "}
+                    {sourceSheet.name} 행들을 대상으로 계산합니다.
+                  </p>
+                </section>
+                <section>
+                  <small>2단계 · 업무 조건</small>
+                  <h2>어떤 행만 포함할까요?</h2>
+                  <p className="formula-help">
+                    아래 조건을 모두 만족하는 행만 합산합니다. 조건값은 직접
+                    입력하거나 현재 행의 필드를 참조할 수 있어요.
+                  </p>
+                  <div className="conditional-rule-list">
+                    {conditionalSumDraft.conditions.map((condition, index) => {
+                      const hasOperand =
+                        condition.operator !== "isBlank" &&
+                        condition.operator !== "isNotBlank";
+                      return (
+                        <div className="conditional-rule" key={condition.id}>
+                          <span>{index === 0 ? "IF" : "AND"}</span>
+                          <select
+                            aria-label={`${index + 1}번째 조건 필드`}
+                            value={condition.column}
+                            onChange={(event) =>
+                              setConditionalSumDraft((current) =>
+                                current && {
+                                  ...current,
+                                  conditions: current.conditions.map((item) =>
+                                    item.id === condition.id
+                                      ? { ...item, column: event.target.value }
+                                      : item,
+                                  ),
+                                },
+                              )
+                            }
+                          >
+                            {sourceSheet.columns.map((column) => (
+                              <option key={column}>{column}</option>
+                            ))}
+                          </select>
+                          <select
+                            aria-label={`${index + 1}번째 비교 방식`}
+                            value={condition.operator}
+                            onChange={(event) =>
+                              setConditionalSumDraft((current) =>
+                                current && {
+                                  ...current,
+                                  conditions: current.conditions.map((item) =>
+                                    item.id === condition.id
+                                      ? {
+                                          ...item,
+                                          operator: event.target
+                                            .value as ConditionalOperator,
+                                        }
+                                      : item,
+                                  ),
+                                },
+                              )
+                            }
+                          >
+                            <option value="eq">같음</option>
+                            <option value="neq">다름</option>
+                            <option value="gt">보다 큼</option>
+                            <option value="gte">이상</option>
+                            <option value="lt">보다 작음</option>
+                            <option value="lte">이하</option>
+                            <option value="isBlank">비어 있음</option>
+                            <option value="isNotBlank">비어 있지 않음</option>
+                          </select>
+                          {hasOperand && (
+                            <>
+                              <select
+                                aria-label={`${index + 1}번째 조건값 종류`}
+                                value={condition.operand.kind}
+                                onChange={(event) =>
+                                  setConditionalSumDraft((current) =>
+                                    current && {
+                                      ...current,
+                                      conditions: current.conditions.map(
+                                        (item) =>
+                                          item.id === condition.id
+                                            ? {
+                                                ...item,
+                                                operand:
+                                                  event.target.value ===
+                                                  "currentRowField"
+                                                    ? {
+                                                        kind: "currentRowField",
+                                                        column:
+                                                          activeSheet.columns[0] ??
+                                                          "",
+                                                      }
+                                                    : {
+                                                        kind: "literal",
+                                                        value: "",
+                                                      },
+                                              }
+                                            : item,
+                                      ),
+                                    },
+                                  )
+                                }
+                              >
+                                <option value="literal">직접 입력</option>
+                                <option value="currentRowField">
+                                  현재 행 필드
+                                </option>
+                              </select>
+                              {condition.operand.kind === "literal" ? (
+                                <input
+                                  aria-label={`${index + 1}번째 조건값`}
+                                  placeholder="조건값"
+                                  value={condition.operand.value}
+                                  onChange={(event) =>
+                                    setConditionalSumDraft((current) =>
+                                      current && {
+                                        ...current,
+                                        conditions: current.conditions.map(
+                                          (item) =>
+                                            item.id === condition.id &&
+                                            item.operand.kind === "literal"
+                                              ? {
+                                                  ...item,
+                                                  operand: {
+                                                    ...item.operand,
+                                                    value: event.target.value,
+                                                  },
+                                                }
+                                              : item,
+                                        ),
+                                      },
+                                    )
+                                  }
+                                />
+                              ) : (
+                                <select
+                                  aria-label={`${index + 1}번째 현재 행 필드`}
+                                  value={condition.operand.column}
+                                  onChange={(event) =>
+                                    setConditionalSumDraft((current) =>
+                                      current && {
+                                        ...current,
+                                        conditions: current.conditions.map(
+                                          (item) =>
+                                            item.id === condition.id &&
+                                            item.operand.kind ===
+                                              "currentRowField"
+                                              ? {
+                                                  ...item,
+                                                  operand: {
+                                                    ...item.operand,
+                                                    column: event.target.value,
+                                                  },
+                                                }
+                                              : item,
+                                        ),
+                                      },
+                                    )
+                                  }
+                                >
+                                  {activeSheet.columns.map((column) => (
+                                    <option key={column}>{column}</option>
+                                  ))}
+                                </select>
+                              )}
+                            </>
+                          )}
+                          <button
+                            aria-label={`${index + 1}번째 조건 삭제`}
+                            disabled={conditionalSumDraft.conditions.length <= 1}
+                            onClick={() =>
+                              setConditionalSumDraft((current) =>
+                                current && {
+                                  ...current,
+                                  conditions: current.conditions.filter(
+                                    (item) => item.id !== condition.id,
+                                  ),
+                                },
+                              )
+                            }
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button
+                    className="add-condition-button"
+                    onClick={addConditionalSumCondition}
+                    disabled={conditionalSumDraft.conditions.length >= 127}
+                  >
+                    <Icons.plus /> AND 조건 추가
+                  </button>
+                </section>
+                <section>
+                  <small>3단계 · 구현 명세</small>
+                  <h2>엔지니어가 구현할 규칙을 확인해주세요</h2>
+                  <div className="business-rule-summary">
+                    <strong>{sourceSheet.name}의 {conditionalSumDraft.valueColumn} 합계</strong>
+                    <p>
+                      현재 {activeSheet.name} 행과 관계로 연결된 데이터 중 {" "}
+                      {conditionalSumDraft.conditions.length}개 조건을 모두 만족하는
+                      행만 포함합니다.
+                    </p>
+                  </div>
+                  <label className="relation-target-sheet">
+                    계산 필드 이름
+                    <input
+                      aria-label="조건부 합계 필드 이름"
+                      value={conditionalSumDraft.name}
+                      onChange={(event) =>
+                        setConditionalSumDraft((current) =>
+                          current && { ...current, name: event.target.value },
+                        )
+                      }
+                    />
+                  </label>
+                  <div className="calculation-preview">
+                    {preview.map((item) => (
+                      <div key={item.rowId}>
+                        <span>{item.label}</span>
+                        <strong>{item.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+                <footer>
+                  <button onClick={() => setConditionalSumDraft(null)}>
+                    취소
+                  </button>
+                  <button
+                    className="confirm"
+                    disabled={!conditionalSumDraft.name.trim()}
+                    onClick={saveConditionalSum}
+                  >
+                    조건부 합계 만들기
+                  </button>
+                </footer>
+              </div>
+            </div>
+          );
+        })()}
       {calculationDraft &&
         (() => {
           const formulaRelations = sheetRelations.filter((item) =>
@@ -3446,8 +4686,9 @@ export function Playground() {
           };
           const labelColumn = activeSheet.columns[0] ?? "";
           const preview = activeSheet.rowIds
-            .slice(0, 3)
+            .slice(0, 5)
             .map((rowId, index) => ({
+              rowId,
               label:
                 activeSheet.rows[index]?.[
                   activeSheet.columns.indexOf(labelColumn)
@@ -3664,7 +4905,7 @@ export function Playground() {
                   </div>
                   <div className="calculation-preview">
                     {preview.map((item) => (
-                      <div key={item.label}>
+                      <div key={item.rowId}>
                         <span>{item.label}</span>
                         <strong>{item.value || "빈 값"}</strong>
                       </div>
