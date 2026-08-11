@@ -5820,6 +5820,17 @@ svg {
   line-height: 1.45;
 }
 
+.business-rule-summary ul {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 8px 0 0 16px;
+  border-top: 1px solid #e5dff7;
+  color: #55458c;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
 @media (max-width: 760px) {
   .conditional-sum-grid {
     grid-template-columns: 1fr;

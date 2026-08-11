@@ -105,6 +105,8 @@ type ConditionalOperator =
   | "isNotBlank";
 type ConditionalSumCondition = {
   id: string;
+  sheetId?: string;
+  relationPath?: string[];
   column: string;
   operator: ConditionalOperator;
   operand:
@@ -584,7 +586,16 @@ function conditionalOperatorLabel(operator: ConditionalOperator) {
 }
 
 function calculatedFieldRelationIds(field: CalculatedField) {
-  return isConditionalSumField(field) ? field.relationPath : field.relationIds;
+  return isConditionalSumField(field)
+    ? [
+        ...new Set([
+          ...field.relationPath,
+          ...field.conditions.flatMap(
+            (condition) => condition.relationPath ?? [],
+          ),
+        ]),
+      ]
+    : field.relationIds;
 }
 
 function relationAllowsSingleRowFrom(
@@ -732,6 +743,36 @@ function compareConditionalValues(
   return comparison <= 0;
 }
 
+function relationPathStartsWith(path: string[], prefix: string[]) {
+  return (
+    path.length >= prefix.length &&
+    prefix.every((relationId, index) => path[index] === relationId)
+  );
+}
+
+function conditionRowsForAggregateRow(
+  field: ConditionalSumField,
+  condition: ConditionalSumCondition,
+  aggregateRowId: string,
+  resultRowId: string,
+  relations: SheetRelation[],
+) {
+  const conditionPath = condition.relationPath ?? field.relationPath;
+  if (relationPathStartsWith(conditionPath, field.relationPath))
+    return traverseRelatedRows(
+      field.sourceSheetId,
+      aggregateRowId,
+      conditionPath.slice(field.relationPath.length),
+      relations,
+    );
+  return traverseRelatedRows(
+    field.resultSheetId,
+    resultRowId,
+    conditionPath,
+    relations,
+  );
+}
+
 function calculateConditionalSum(
   field: ConditionalSumField,
   relations: SheetRelation[],
@@ -755,14 +796,33 @@ function calculateConditionalSum(
     const row = sourceSheet.rows[rowIndex];
     if (!row) continue;
     const matches = field.conditions.every((condition) => {
-      const left = row[sourceSheet.columns.indexOf(condition.column)] ?? "";
+      const conditionSheetId = condition.sheetId ?? field.sourceSheetId;
+      const conditionSheet = sheets.find(
+        (sheet) => sheet.id === conditionSheetId,
+      );
+      if (!conditionSheet) return false;
+      const conditionRows = conditionRowsForAggregateRow(
+        field,
+        condition,
+        rowId,
+        resultRowId,
+        relations,
+      );
+      if (conditionRows.sheetId !== conditionSheetId) return false;
       const right =
         condition.operand.kind === "literal"
           ? condition.operand.value
           : (resultSheet.rows[resultRowIndex]?.[
               resultSheet.columns.indexOf(condition.operand.column)
             ] ?? "");
-      return compareConditionalValues(left, condition.operator, right);
+      return conditionRows.rowIds.some((conditionRowId) => {
+        const conditionRowIndex = conditionSheet.rowIds.indexOf(conditionRowId);
+        const left =
+          conditionSheet.rows[conditionRowIndex]?.[
+            conditionSheet.columns.indexOf(condition.column)
+          ] ?? "";
+        return compareConditionalValues(left, condition.operator, right);
+      });
     });
     if (!matches) continue;
     const value = parseNumericValue(
@@ -2004,11 +2064,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   );
   const canCreateCalculation =
     reachableSheetPaths.length > 1 && calculableSheetPaths.length > 0;
-  const aggregateSheetPaths = aggregateReachableSheetsFrom(
+  const conditionalSheetPaths = aggregateReachableSheetsFrom(
     activeSheet,
     sheetRelations,
     sheets,
-  ).filter(
+  );
+  const aggregateSheetPaths = conditionalSheetPaths.filter(
     ({ sheet, relationPath }) =>
       relationPath.length > 0 && numericColumns(sheet).length > 0,
   );
@@ -2114,7 +2175,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   function currentProjectDocument() {
     return {
-      schemaVersion: 8,
+      schemaVersion: 9,
       pages,
       activePageId,
       canvasView,
@@ -2465,7 +2526,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           document: {
-            schemaVersion: 8,
+            schemaVersion: 9,
             pages,
             activePageId,
             canvasView,
@@ -2711,7 +2772,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         (field) =>
           field.resultSheetId !== sheetToDelete.id &&
           (isConditionalSumField(field)
-            ? field.sourceSheetId !== sheetToDelete.id
+            ? field.sourceSheetId !== sheetToDelete.id &&
+              !field.conditions.some(
+                (condition) => condition.sheetId === sheetToDelete.id,
+              )
             : !field.formula.some(
                 (token) =>
                   token.kind === "field" &&
@@ -3004,10 +3068,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           if (isConditionalSumField(field))
             return !(
               (field.sourceSheetId === activeSheet.id &&
-                (field.valueColumn === column ||
-                  field.conditions.some(
-                    (condition) => condition.column === column,
-                  ))) ||
+                field.valueColumn === column) ||
+              field.conditions.some(
+                (condition) =>
+                  (condition.sheetId ?? field.sourceSheetId) ===
+                    activeSheet.id && condition.column === column,
+              ) ||
               (field.resultSheetId === activeSheet.id &&
                 field.conditions.some(
                   (condition) =>
@@ -3113,6 +3179,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         conditions: [
           {
             id: crypto.randomUUID(),
+            sheetId: target.sheet.id,
+            relationPath: target.relationPath,
             column: target.sheet.columns[0] ?? "",
             operator: "eq",
             operand: { kind: "literal", value: "" },
@@ -3123,10 +3191,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   }
 
   function addConditionalSumCondition() {
-    const source = sheets.find(
-      (sheet) => sheet.id === conditionalSumDraft?.sourceSheetId,
+    const target = aggregateSheetPaths.find(
+      ({ sheet }) => sheet.id === conditionalSumDraft?.sourceSheetId,
     );
-    if (!source) return;
+    if (!target) return;
     setConditionalSumDraft((current) =>
       current && {
         ...current,
@@ -3134,7 +3202,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           ...current.conditions,
           {
             id: crypto.randomUUID(),
-            column: source.columns[0] ?? "",
+            sheetId: target.sheet.id,
+            relationPath: target.relationPath,
+            column: target.sheet.columns[0] ?? "",
             operator: "eq",
             operand: { kind: "literal", value: "" },
           },
@@ -4596,6 +4666,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                 conditions: [
                                   {
                                     id: crypto.randomUUID(),
+                                    sheetId: target.sheet.id,
+                                    relationPath: target.relationPath,
                                     column: target.sheet.columns[0]!,
                                     operator: "eq",
                                     operand: { kind: "literal", value: "" },
@@ -4946,6 +5018,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   <h2>모두 만족하는 행만 합산</h2>
                   <ol className="calculation-detail-conditions">
                     {field.conditions.map((condition) => {
+                      const conditionPath =
+                        condition.relationPath ?? field.relationPath;
                       const operand =
                         condition.operand.kind === "literal"
                           ? condition.operand.value
@@ -4955,7 +5029,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                         condition.operator !== "isNotBlank";
                       return (
                         <li key={condition.id}>
-                          <span>{condition.column}</span>
+                          <span>
+                            {relationPathLabel(
+                              resultSheet,
+                              conditionPath,
+                              sheetRelations,
+                              sheets,
+                            )} · {condition.column}
+                          </span>
                           <strong>
                             {conditionalOperatorLabel(condition.operator)}
                           </strong>
@@ -4988,7 +5069,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             kind: "conditionalSum",
           };
           const previewRelations = sheetRelations.filter((relation) =>
-            conditionalSumDraft.relationPath.includes(relation.id),
+            calculatedFieldRelationIds(previewField).includes(relation.id),
           );
           const preview = activeSheet.rowIds.slice(0, 5).map((rowId, index) => ({
             rowId,
@@ -5080,36 +5161,70 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   <small>2단계 · 업무 조건</small>
                   <h2>어떤 행만 포함할까요?</h2>
                   <p className="formula-help">
-                    아래 조건을 모두 만족하는 행만 합산합니다. 조건값은 직접
-                    입력하거나 현재 행의 필드를 참조할 수 있어요.
+                    현재 시트와 연결된 모든 관계 경로에서 조건 필드를 고를 수
+                    있습니다. 각 조건을 모두 만족하는 집계 대상 행만 합산합니다.
                   </p>
                   <div className="conditional-rule-list">
                     {conditionalSumDraft.conditions.map((condition, index) => {
                       const hasOperand =
                         condition.operator !== "isBlank" &&
                         condition.operator !== "isNotBlank";
+                      const conditionSheetId =
+                        condition.sheetId ?? conditionalSumDraft.sourceSheetId;
+                      const conditionPath =
+                        condition.relationPath ??
+                        conditionalSumDraft.relationPath;
                       return (
                         <div className="conditional-rule" key={condition.id}>
                           <span>{index === 0 ? "IF" : "AND"}</span>
                           <select
                             aria-label={`${index + 1}번째 조건 필드`}
-                            value={condition.column}
-                            onChange={(event) =>
+                            value={JSON.stringify([
+                              conditionSheetId,
+                              condition.column,
+                              conditionPath,
+                            ])}
+                            onChange={(event) => {
+                              const [sheetId, column, relationPath] = JSON.parse(
+                                event.target.value,
+                              ) as [string, string, string[]];
                               setConditionalSumDraft((current) =>
                                 current && {
                                   ...current,
                                   conditions: current.conditions.map((item) =>
                                     item.id === condition.id
-                                      ? { ...item, column: event.target.value }
+                                      ? {
+                                          ...item,
+                                          sheetId,
+                                          relationPath,
+                                          column,
+                                        }
                                       : item,
                                   ),
                                 },
-                              )
-                            }
+                              );
+                            }}
                           >
-                            {sourceSheet.columns.map((column) => (
-                              <option key={column}>{column}</option>
-                            ))}
+                            {conditionalSheetPaths.flatMap(
+                              ({ sheet, relationPath }) =>
+                                sheet.columns.map((column) => (
+                                  <option
+                                    key={`${sheet.id}:${column}`}
+                                    value={JSON.stringify([
+                                      sheet.id,
+                                      column,
+                                      relationPath,
+                                    ])}
+                                  >
+                                    {relationPathLabel(
+                                      activeSheet,
+                                      relationPath,
+                                      sheetRelations,
+                                      sheets,
+                                    )} · {column}
+                                  </option>
+                                )),
+                            )}
                           </select>
                           <select
                             aria-label={`${index + 1}번째 비교 방식`}
@@ -5276,6 +5391,32 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       {conditionalSumDraft.conditions.length}개 조건을 모두 만족하는
                       행만 포함합니다.
                     </p>
+                    <ul>
+                      {conditionalSumDraft.conditions.map((condition) => {
+                        const conditionPath =
+                          condition.relationPath ??
+                          conditionalSumDraft.relationPath;
+                        const operand =
+                          condition.operand.kind === "literal"
+                            ? condition.operand.value || "빈 값"
+                            : `현재 행의 ${condition.operand.column}`;
+                        return (
+                          <li key={condition.id}>
+                            {relationPathLabel(
+                              activeSheet,
+                              conditionPath,
+                              sheetRelations,
+                              sheets,
+                            )} · {condition.column}{" "}
+                            {conditionalOperatorLabel(condition.operator)}{" "}
+                            {condition.operator !== "isBlank" &&
+                            condition.operator !== "isNotBlank"
+                              ? operand
+                              : ""}
+                          </li>
+                        );
+                      })}
+                    </ul>
                   </div>
                   <label className="relation-target-sheet">
                     계산 필드 이름
