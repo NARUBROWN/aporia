@@ -1313,6 +1313,7 @@ export function Playground() {
   const [hydrated, setHydrated] = useState(false);
   const skipInitialSaveRef = useRef(true);
   const [saveStatus, setSaveStatus] = useState("데이터베이스 연결 중");
+  const [sheetDockHeight, setSheetDockHeight] = useState(235);
   const nextId = useRef(1);
   const panRef = useRef<{
     startX: number;
@@ -2311,6 +2312,31 @@ export function Playground() {
     setPropertiesOpen(false);
   }
 
+  function resizeSheetDock(nextHeight: number) {
+    const maxHeight = Math.max(260, window.innerHeight - 210);
+    setSheetDockHeight(Math.min(maxHeight, Math.max(150, nextHeight)));
+  }
+
+  function startSheetDockResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = sheetDockHeight;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      moveEvent.preventDefault();
+      resizeSheetDock(startHeight + startY - moveEvent.clientY);
+    };
+    const onEnd = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+  }
+
   function startResize(
     event: React.PointerEvent<HTMLButtonElement>,
     item: CanvasItem,
@@ -2439,7 +2465,12 @@ export function Playground() {
   }
 
   return (
-    <div className="studio ui-studio">
+    <div
+      className="studio ui-studio"
+      style={{
+        gridTemplateRows: `62px minmax(180px, 1fr) ${sheetDockHeight}px`,
+      }}
+    >
       <header className="studio-topbar">
         <div className="studio-title">
           <Link href="/projects">LCA 데이터 정제</Link>
@@ -2898,6 +2929,29 @@ export function Playground() {
         )}
       </div>
       <section className="sheet-dock" aria-label="데이터 시트">
+        <div
+          role="separator"
+          tabIndex={0}
+          className="sheet-dock-resizer"
+          aria-label="데이터 시트 높이 조절"
+          aria-orientation="horizontal"
+          aria-valuemin={150}
+          aria-valuemax={Math.max(260, sheetDockHeight)}
+          aria-valuenow={sheetDockHeight}
+          onPointerDown={startSheetDockResize}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              resizeSheetDock(sheetDockHeight + 24);
+            }
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              resizeSheetDock(sheetDockHeight - 24);
+            }
+          }}
+        >
+          <span />
+        </div>
         <div className="sheet-tabs">
           <div className="sheet-title">
             <Icons.database />
