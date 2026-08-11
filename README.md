@@ -1,36 +1,48 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Aporia
 
-## Getting Started
+도메인 전문가가 웹 화면과 데이터 시트를 직접 구성하고 관계를 확인하는 시각적 시스템 빌더입니다.
 
-First, run the development server:
+## 로컬 실행
+
+필요한 프로그램은 Node.js, npm, Docker입니다.
 
 ```bash
+cp .env.example .env.local
+docker compose up -d
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+[http://localhost:3000/playground](http://localhost:3000/playground)에서 플레이그라운드를 열 수 있습니다.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+PostgreSQL 상태 확인:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+docker compose ps
+```
 
-## Learn More
+종료:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+docker compose down
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+`docker compose down`은 컨테이너만 종료하며 데이터 볼륨은 유지합니다.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 저장 구조
 
-## Deploy on Vercel
+- PostgreSQL 17
+- `projects` 테이블의 `document` JSONB에 편집 문서 저장
+- 화면 컴포넌트, 데이터 시트, 내부 행 식별자, 다중 시트 연결 설정 포함
+- 편집 후 700ms 단위로 자동 저장
+- 문서 저장마다 `version` 증가
+- API 문서 크기 제한 5MB
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+초기 스키마는 [database/init.sql](database/init.sql), PostgreSQL 구성은 [compose.yaml](compose.yaml)에 있습니다.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 검사
+
+```bash
+npm run lint
+npm run build
+```
