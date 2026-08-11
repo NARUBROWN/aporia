@@ -1,5 +1,6 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { requestHasProjectAccess } from "@/lib/project-security";
 
 type DocumentRecord = Record<string, unknown>;
 
@@ -22,12 +23,14 @@ export async function GET(
   context: RouteContext<"/api/projects/[id]/snapshots">,
 ) {
   const { id } = await context.params;
-  const project = await prisma.project.findUnique({
-    where: { id },
-    select: { id: true },
+  const project = await prisma.project.findFirst({
+    where: { id, deletedAt: null },
+    select: { id: true, passwordHash: true },
   });
   if (!project)
     return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (!requestHasProjectAccess(_request, id, project.passwordHash))
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const snapshots = await prisma.projectSnapshot.findMany({
     where: { projectId: id },
@@ -51,6 +54,10 @@ export async function POST(
   context: RouteContext<"/api/projects/[id]/snapshots">,
 ) {
   const { id } = await context.params;
+  const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (!requestHasProjectAccess(request, id, existing.passwordHash))
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   const raw = await request.text();
   if (raw.length > 5_000_000)
     return Response.json({ error: "DOCUMENT_TOO_LARGE" }, { status: 413 });
@@ -72,14 +79,9 @@ export async function POST(
 
   const document = body.document as DocumentRecord as Prisma.InputJsonValue;
   const result = await prisma.$transaction(async (transaction) => {
-    const project = await transaction.project.upsert({
+    const project = await transaction.project.update({
       where: { id },
-      create: {
-        id,
-        name: id === "demo" ? "고객 관리 화면" : "새 프로젝트",
-        document,
-      },
-      update: { document, version: { increment: 1 } },
+      data: { document, version: { increment: 1 } },
     });
     const snapshot = await transaction.projectSnapshot.create({
       data: {

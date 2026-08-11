@@ -3,7 +3,7 @@
 import { validateSheetValue } from "@/lib/sheet-value-validation";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Icons } from "@/components/icons";
 
 type ComponentKind =
@@ -44,6 +44,7 @@ type DisplayBinding = {
 };
 type DisplayBindings = Record<string, DisplayBinding>;
 type RelationType = "1:1" | "1:N" | "N:1" | "N:N";
+type SheetViewMode = "grid" | "erd";
 type JoinCandidate = {
   id: string;
   leftColumn: number;
@@ -355,6 +356,14 @@ const initialDataBinding: DataBindingConfig = {
   selectedCandidateId: "stg-source:3-dim-master:1",
   relationType: "N:1",
 };
+const blankDataBinding: DataBindingConfig = {
+  primarySheet: "",
+  joinedSheet: "",
+  linkSourceId: "",
+  connectionPath: [],
+  selectedCandidateId: "",
+  relationType: "N:1",
+};
 const initialSheetRelations: SheetRelation[] = [
   {
     id: "relation-stg-dim-material",
@@ -394,6 +403,9 @@ const initialPages: BuilderPage[] = [
     path: "/lca-data",
     items: initialItems,
   },
+];
+const blankPages: BuilderPage[] = [
+  { id: "page-1", name: "첫 화면", path: "/", items: [] },
 ];
 const resizeDirections: ResizeDirection[] = [
   "nw",
@@ -556,6 +568,19 @@ function isConditionalSumField(
   field: CalculatedField,
 ): field is ConditionalSumField {
   return field.kind === "conditionalSum";
+}
+
+function conditionalOperatorLabel(operator: ConditionalOperator) {
+  return {
+    eq: "같음",
+    neq: "다름",
+    gt: "보다 큼",
+    gte: "이상",
+    lt: "보다 작음",
+    lte: "이하",
+    isBlank: "비어 있음",
+    isNotBlank: "비어 있지 않음",
+  }[operator];
 }
 
 function calculatedFieldRelationIds(field: CalculatedField) {
@@ -1483,10 +1508,365 @@ function DataBindingPanel({
   );
 }
 
-export function Playground() {
-  const [pages, setPages] = useState(initialPages);
-  const [activePageId, setActivePageId] = useState("lca-page");
-  const [selectedId, setSelectedId] = useState("table");
+function relationCardinality(
+  relationType: RelationType,
+  endpoint: "source" | "target",
+) {
+  const [source, target] = relationType.split(":");
+  return endpoint === "source" ? source : target;
+}
+
+function arrangeSheetsOnGrid(sheets: Sheet[], relations: SheetRelation[]) {
+  const columnCount =
+    sheets.length <= 4
+      ? Math.max(1, sheets.length)
+      : Math.min(4, Math.ceil(Math.sqrt(sheets.length)));
+  const rowCount = Math.max(1, Math.ceil(sheets.length / columnCount));
+  const sheetIds = new Set(sheets.map((sheet) => sheet.id));
+  const neighbors = new Map(
+    sheets.map((sheet) => [sheet.id, new Set<string>()]),
+  );
+  relations.forEach((relation) => {
+    if (
+      !sheetIds.has(relation.sourceSheetId) ||
+      !sheetIds.has(relation.targetSheetId) ||
+      relation.sourceSheetId === relation.targetSheetId
+    )
+      return;
+    neighbors.get(relation.sourceSheetId)?.add(relation.targetSheetId);
+    neighbors.get(relation.targetSheetId)?.add(relation.sourceSheetId);
+  });
+
+  const emptyCells = Array.from({ length: rowCount * columnCount }, (_, index) => ({
+    row: Math.floor(index / columnCount),
+    column: index % columnCount,
+  }));
+  const center = {
+    row: (rowCount - 1) / 2,
+    column: (columnCount - 1) / 2,
+  };
+  const placements = new Map<string, { row: number; column: number }>();
+  const unplaced = new Set(sheets.map((sheet) => sheet.id));
+
+  while (unplaced.size > 0) {
+    const nextSheetId = [...unplaced].sort((left, right) => {
+      const leftPlacedNeighbors = [...(neighbors.get(left) ?? [])].filter(
+        (neighbor) => placements.has(neighbor),
+      ).length;
+      const rightPlacedNeighbors = [...(neighbors.get(right) ?? [])].filter(
+        (neighbor) => placements.has(neighbor),
+      ).length;
+      return (
+        rightPlacedNeighbors - leftPlacedNeighbors ||
+        (neighbors.get(right)?.size ?? 0) - (neighbors.get(left)?.size ?? 0) ||
+        left.localeCompare(right)
+      );
+    })[0]!;
+    const placedNeighbors = [...(neighbors.get(nextSheetId) ?? [])]
+      .map((neighbor) => placements.get(neighbor))
+      .filter((position): position is { row: number; column: number } =>
+        Boolean(position),
+      );
+    const target = placedNeighbors.length
+      ? {
+          row:
+            placedNeighbors.reduce((sum, position) => sum + position.row, 0) /
+            placedNeighbors.length,
+          column:
+            placedNeighbors.reduce(
+              (sum, position) => sum + position.column,
+              0,
+            ) / placedNeighbors.length,
+        }
+      : center;
+    const selectedCell = emptyCells.sort((left, right) => {
+      const neighborDistance = (cell: { row: number; column: number }) =>
+        placedNeighbors.reduce(
+          (sum, position) =>
+            sum +
+            Math.abs(position.row - cell.row) +
+            Math.abs(position.column - cell.column),
+          0,
+        );
+      const targetDistance = (cell: { row: number; column: number }) =>
+        Math.abs(target.row - cell.row) + Math.abs(target.column - cell.column);
+      const centerDistance = (cell: { row: number; column: number }) =>
+        Math.abs(center.row - cell.row) + Math.abs(center.column - cell.column);
+      return (
+        neighborDistance(left) - neighborDistance(right) ||
+        targetDistance(left) - targetDistance(right) ||
+        centerDistance(left) - centerDistance(right) ||
+        left.row - right.row ||
+        left.column - right.column
+      );
+    })[0]!;
+    placements.set(nextSheetId, selectedCell);
+    emptyCells.splice(emptyCells.indexOf(selectedCell), 1);
+    unplaced.delete(nextSheetId);
+  }
+
+  return { columnCount, rowCount, placements };
+}
+
+function SheetErdView({
+  sheets,
+  relations,
+  activeSheetId,
+  onSelectSheet,
+}: {
+  sheets: Sheet[];
+  relations: SheetRelation[];
+  activeSheetId: string;
+  onSelectSheet: (sheetId: string) => void;
+}) {
+  const [focusedSheetId, setFocusedSheetId] = useState<string | null>(null);
+  const effectiveFocusedSheetId = sheets.some(
+    (sheet) => sheet.id === focusedSheetId,
+  )
+    ? focusedSheetId
+    : null;
+  const visibleRelations = effectiveFocusedSheetId
+    ? relations.filter(
+        (relation) =>
+          relation.sourceSheetId === effectiveFocusedSheetId ||
+          relation.targetSheetId === effectiveFocusedSheetId,
+      )
+    : relations;
+  const visibleSheetIds = effectiveFocusedSheetId
+    ? new Set([
+        effectiveFocusedSheetId,
+        ...visibleRelations.flatMap((relation) => [
+          relation.sourceSheetId,
+          relation.targetSheetId,
+        ]),
+      ])
+    : new Set(sheets.map((sheet) => sheet.id));
+  const visibleSheets = sheets.filter((sheet) => visibleSheetIds.has(sheet.id));
+  const focusedSheet = effectiveFocusedSheetId
+    ? sheets.find((sheet) => sheet.id === effectiveFocusedSheetId)
+    : null;
+  const { columnCount, rowCount, placements } = arrangeSheetsOnGrid(
+    visibleSheets,
+    visibleRelations,
+  );
+  const nodeWidth = 264;
+  const columnGap = 86;
+  const left = 48;
+  const top = 34;
+  const headerHeight = 42;
+  const fieldHeight = 27;
+  const rowGap = 74;
+  const nodeHeights = new Map(
+    visibleSheets.map((sheet) => [
+      sheet.id,
+      headerHeight + Math.max(1, sheet.columns.length) * fieldHeight + 12,
+    ]),
+  );
+  const rowHeights = Array.from({ length: rowCount }, (_, row) =>
+    Math.max(
+      0,
+      ...visibleSheets
+        .filter((sheet) => placements.get(sheet.id)?.row === row)
+        .map((sheet) => nodeHeights.get(sheet.id) ?? 0),
+    ),
+  );
+  const rowTop = (row: number) =>
+    top +
+    rowHeights.slice(0, row).reduce((sum, height) => sum + height, 0) +
+    row * rowGap;
+  const canvasWidth = Math.max(
+    760,
+    left * 2 + columnCount * nodeWidth + (columnCount - 1) * columnGap,
+  );
+  const canvasHeight = Math.max(
+    250,
+    top * 2 +
+      rowHeights.reduce((sum, height) => sum + height, 0) +
+      Math.max(0, rowCount - 1) * rowGap,
+  );
+  const positions = new Map(
+    visibleSheets.map((sheet) => {
+      const placement = placements.get(sheet.id) ?? { row: 0, column: 0 };
+      return [
+        sheet.id,
+        {
+          x: left + placement.column * (nodeWidth + columnGap),
+          y: rowTop(placement.row),
+        },
+      ];
+    }),
+  );
+
+  return (
+    <div className="sheet-erd-wrap">
+      {focusedSheet && (
+        <div className="sheet-erd-focus-toolbar" role="status">
+          <span>
+            <b>{focusedSheet.name}</b>
+            직접 연결 {visibleRelations.length}개
+          </span>
+          <button type="button" onClick={() => setFocusedSheetId(null)}>
+            전체 보기
+          </button>
+        </div>
+      )}
+      <div
+        className="sheet-erd-canvas"
+        style={{ width: canvasWidth, height: canvasHeight }}
+        aria-label={`ERD: 테이블 ${visibleSheets.length}개, 관계 ${visibleRelations.length}개`}
+      >
+        <svg
+          className="sheet-erd-relations"
+          width={canvasWidth}
+          height={canvasHeight}
+          aria-hidden="true"
+        >
+          {visibleRelations.map((relation) => {
+            const source = visibleSheets.find(
+              (sheet) => sheet.id === relation.sourceSheetId,
+            );
+            const target = visibleSheets.find(
+              (sheet) => sheet.id === relation.targetSheetId,
+            );
+            const sourcePosition = positions.get(relation.sourceSheetId);
+            const targetPosition = positions.get(relation.targetSheetId);
+            if (!source || !target || !sourcePosition || !targetPosition)
+              return null;
+
+            const sourceColumn = Math.max(
+              0,
+              source.columns.indexOf(relation.sourceColumn),
+            );
+            const targetColumn = Math.max(
+              0,
+              target.columns.indexOf(relation.targetColumn),
+            );
+            const horizontal =
+              Math.abs(targetPosition.x - sourcePosition.x) >=
+              Math.abs(targetPosition.y - sourcePosition.y);
+            const targetIsRight = targetPosition.x >= sourcePosition.x;
+            const targetIsBelow = targetPosition.y >= sourcePosition.y;
+            const sourceX = horizontal
+              ? sourcePosition.x + (targetIsRight ? nodeWidth : 0)
+              : sourcePosition.x + nodeWidth / 2;
+            const targetX = horizontal
+              ? targetPosition.x + (targetIsRight ? 0 : nodeWidth)
+              : targetPosition.x + nodeWidth / 2;
+            const sourceY = horizontal
+              ? sourcePosition.y + headerHeight + sourceColumn * fieldHeight + 13
+              : sourcePosition.y +
+                (targetIsBelow ? (nodeHeights.get(source.id) ?? 0) : 0);
+            const targetY = horizontal
+              ? targetPosition.y + headerHeight + targetColumn * fieldHeight + 13
+              : targetPosition.y +
+                (targetIsBelow ? 0 : (nodeHeights.get(target.id) ?? 0));
+            const curve = horizontal
+              ? Math.max(54, Math.abs(targetX - sourceX) * 0.42)
+              : Math.max(44, Math.abs(targetY - sourceY) * 0.42);
+            const sourceControlX = horizontal
+              ? sourceX + (targetIsRight ? curve : -curve)
+              : sourceX;
+            const targetControlX = horizontal
+              ? targetX + (targetIsRight ? -curve : curve)
+              : targetX;
+            const sourceControlY = horizontal
+              ? sourceY
+              : sourceY + (targetIsBelow ? curve : -curve);
+            const targetControlY = horizontal
+              ? targetY
+              : targetY + (targetIsBelow ? -curve : curve);
+            return (
+              <g key={relation.id}>
+                <path
+                  d={`M ${sourceX} ${sourceY} C ${sourceControlX} ${sourceControlY}, ${targetControlX} ${targetControlY}, ${targetX} ${targetY}`}
+                />
+                <circle cx={sourceX} cy={sourceY} r="3.5" />
+                <circle cx={targetX} cy={targetY} r="3.5" />
+                <text
+                  x={sourceX + (horizontal ? (targetIsRight ? 12 : -12) : 10)}
+                  y={sourceY + (horizontal ? -7 : targetIsBelow ? 14 : -8)}
+                  textAnchor={horizontal ? (targetIsRight ? "start" : "end") : "start"}
+                >
+                  {relationCardinality(relation.relationType, "source")}
+                </text>
+                <text
+                  x={targetX + (horizontal ? (targetIsRight ? -12 : 12) : 10)}
+                  y={targetY + (horizontal ? -7 : targetIsBelow ? -8 : 14)}
+                  textAnchor={horizontal ? (targetIsRight ? "end" : "start") : "start"}
+                >
+                  {relationCardinality(relation.relationType, "target")}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+        {visibleSheets.map((sheet) => {
+          const position = positions.get(sheet.id)!;
+          const relatedColumns = new Set(
+            visibleRelations.flatMap((relation) => {
+              if (relation.sourceSheetId === sheet.id)
+                return [relation.sourceColumn];
+              if (relation.targetSheetId === sheet.id)
+                return [relation.targetColumn];
+              return [];
+            }),
+          );
+          return (
+            <button
+              key={sheet.id}
+              type="button"
+              className={`sheet-erd-node ${sheet.id === effectiveFocusedSheetId ? "focused" : sheet.id === activeSheetId ? "active" : ""}`}
+              style={{
+                left: position.x,
+                top: position.y,
+                width: nodeWidth,
+                minHeight: nodeHeights.get(sheet.id),
+              }}
+              aria-label={`${sheet.name} 테이블, 필드 ${sheet.columns.length}개`}
+              onClick={() => {
+                onSelectSheet(sheet.id);
+                setFocusedSheetId((current) =>
+                  current === sheet.id ? null : sheet.id,
+                );
+              }}
+            >
+              <span className="sheet-erd-node-header">
+                <span className="table-dot" />
+                <strong>{sheet.name}</strong>
+                <small>{sheet.rows.length}행</small>
+              </span>
+              <span className="sheet-erd-fields">
+                {sheet.columns.map((column, index) => (
+                  <span
+                    key={`${sheet.id}-${column}-${index}`}
+                    className={relatedColumns.has(column) ? "related" : ""}
+                  >
+                    <span className="sheet-erd-field-key">
+                      {relatedColumns.has(column) ? "↔" : ""}
+                    </span>
+                    <b>{column}</b>
+                    <em>{columnTypeLabel(columnType(sheet, index))}</em>
+                  </span>
+                ))}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function Playground({ projectId, projectName, hasPassword }: { projectId: string | null; projectName: string; hasPassword: boolean }) {
+  const router = useRouter();
+  const isTemporary = projectId === null;
+  const [displayProjectName, setDisplayProjectName] = useState(projectName);
+  const [editingProjectName, setEditingProjectName] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const cancelProjectRenameRef = useRef(false);
+  const [pages, setPages] = useState(isTemporary ? blankPages : initialPages);
+  const [activePageId, setActivePageId] = useState(isTemporary ? "page-1" : "lca-page");
+  const [selectedId, setSelectedId] = useState(isTemporary ? "" : "table");
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [editingPageId, setEditingPageId] = useState<string | null>(null);
@@ -1496,11 +1876,11 @@ export function Playground() {
     y: 55,
     zoom: 0.9,
   });
-  const [sheets, setSheets] = useState(initialSheets);
+  const [sheets, setSheets] = useState<Sheet[]>(isTemporary ? [] : initialSheets);
   const [cellValidationErrors, setCellValidationErrors] = useState<
     Record<string, string>
   >({});
-  const [activeSheetId, setActiveSheetId] = useState("stg-source");
+  const [activeSheetId, setActiveSheetId] = useState(isTemporary ? "" : "stg-source");
   const [editingSheetId, setEditingSheetId] = useState<string | null>(null);
   const [sheetNameDraft, setSheetNameDraft] = useState("");
   const cancelSheetRenameRef = useRef(false);
@@ -1513,7 +1893,7 @@ export function Playground() {
     null,
   );
   const [sheetRelations, setSheetRelations] = useState<SheetRelation[]>(
-    initialSheetRelations,
+    isTemporary ? [] : initialSheetRelations,
   );
   const [relationDraft, setRelationDraft] = useState<RelationDraft | null>(
     null,
@@ -1525,11 +1905,15 @@ export function Playground() {
     useState<CalculationDraft | null>(null);
   const [conditionalSumDraft, setConditionalSumDraft] =
     useState<ConditionalSumDraft | null>(null);
+  const [inspectingCalculatedField, setInspectingCalculatedField] =
+    useState<CalculatedField | null>(null);
   const [propertyTab, setPropertyTab] = useState<"design" | "data" | "action">(
     "design",
   );
-  const [dataBinding, setDataBinding] = useState(initialDataBinding);
-  const [displayBindings, setDisplayBindings] = useState<DisplayBindings>({
+  const [dataBinding, setDataBinding] = useState<DataBindingConfig>(
+    isTemporary ? blankDataBinding : initialDataBinding,
+  );
+  const [displayBindings, setDisplayBindings] = useState<DisplayBindings>(isTemporary ? {} : {
     heading: {
       sheetId: "dim-master",
       field: "자재명",
@@ -1543,9 +1927,9 @@ export function Playground() {
       rowId: "",
     },
   });
-  const [hydrated, setHydrated] = useState(false);
+  const [hydrated, setHydrated] = useState(isTemporary);
   const skipInitialSaveRef = useRef(true);
-  const [saveStatus, setSaveStatus] = useState("데이터베이스 연결 중");
+  const [saveStatus, setSaveStatus] = useState(isTemporary ? "저장되지 않는 임시 캔버스" : "데이터베이스 연결 중");
   const [snapshotPanelOpen, setSnapshotPanelOpen] = useState(false);
   const [savedSnapshots, setSavedSnapshots] = useState<
     SavedProjectSnapshot[]
@@ -1553,6 +1937,10 @@ export function Playground() {
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [snapshotError, setSnapshotError] = useState("");
   const [restoringSnapshotId, setRestoringSnapshotId] = useState("");
+  const [securityDialog, setSecurityDialog] = useState<"set-pin" | "delete" | null>(null);
+  const [securityPin, setSecurityPin] = useState("");
+  const [securityError, setSecurityError] = useState("");
+  const [securityLoading, setSecurityLoading] = useState(false);
   const projectHistoryRef = useRef<ProjectSnapshot[]>([]);
   const projectHistoryIndexRef = useRef(-1);
   const applyingProjectHistoryRef = useRef(false);
@@ -1568,6 +1956,7 @@ export function Playground() {
   const [sheetDockHeight, setSheetDockHeight] = useState(235);
   const [sheetDockMode, setSheetDockMode] =
     useState<SheetDockMode>("normal");
+  const [sheetViewMode, setSheetViewMode] = useState<SheetViewMode>("grid");
   const [sheetSearchOpen, setSheetSearchOpen] = useState(false);
   const [sheetSearchQuery, setSheetSearchQuery] = useState("");
   const normalSheetDockHeightRef = useRef(235);
@@ -1737,8 +2126,53 @@ export function Playground() {
     };
   }
 
+  function startProjectRename() {
+    cancelProjectRenameRef.current = false;
+    setProjectNameDraft(displayProjectName);
+    setEditingProjectName(true);
+  }
+
+  function cancelProjectRename() {
+    cancelProjectRenameRef.current = true;
+    setProjectNameDraft(displayProjectName);
+    setEditingProjectName(false);
+  }
+
+  async function saveProjectName() {
+    if (cancelProjectRenameRef.current) {
+      cancelProjectRenameRef.current = false;
+      return;
+    }
+
+    const name = projectNameDraft.trim();
+    setEditingProjectName(false);
+    if (!name || name === displayProjectName) return;
+
+    const previousName = displayProjectName;
+    setDisplayProjectName(name);
+    if (isTemporary) {
+      setSaveStatus("이름 변경은 현재 탭에서만 유지됩니다");
+      return;
+    }
+    setSaveStatus("프로젝트 이름 저장 중");
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, document: currentProjectDocument() }),
+      });
+      if (!response.ok) throw new Error("프로젝트 이름을 저장하지 못했습니다.");
+      setSaveStatus("프로젝트 이름 저장됨");
+    } catch {
+      setDisplayProjectName(previousName);
+      setProjectNameDraft(previousName);
+      setSaveStatus("프로젝트 이름 저장 실패 · 다시 시도하세요");
+    }
+  }
+
   async function loadSavedSnapshots() {
-    const response = await fetch("/api/projects/demo/snapshots", {
+    if (!projectId) return;
+    const response = await fetch(`/api/projects/${projectId}/snapshots`, {
       cache: "no-store",
     });
     if (!response.ok) throw new Error("스냅샷 기록을 불러오지 못했습니다.");
@@ -1749,13 +2183,18 @@ export function Playground() {
   }
 
   async function saveProjectSnapshot() {
+    if (!projectId) {
+      if (window.confirm("현재 작업을 저장하려면 프로젝트를 만들어야 합니다. 프로젝트 생성 화면으로 이동할까요?"))
+        router.push("/projects/new");
+      return;
+    }
     commitLatestProjectSnapshot();
     setSnapshotPanelOpen(true);
     setSnapshotLoading(true);
     setSnapshotError("");
     setSaveStatus("프로젝트와 스냅샷 저장 중");
     try {
-      const response = await fetch("/api/projects/demo/snapshots", {
+      const response = await fetch(`/api/projects/${projectId}/snapshots`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ document: currentProjectDocument() }),
@@ -1773,6 +2212,36 @@ export function Playground() {
     }
   }
 
+  function openSecurityDialog(dialog: "set-pin" | "delete") {
+    setSecurityPin("");
+    setSecurityError("");
+    setSecurityDialog(dialog);
+  }
+
+  async function submitSecurityDialog() {
+    if (!projectId || !securityDialog) return;
+    const needsPin = securityDialog === "set-pin" || hasPassword;
+    if (needsPin && securityPin.length !== 4) return setSecurityError("숫자 4자리를 입력해주세요.");
+    setSecurityLoading(true);
+    setSecurityError("");
+    const settingPin = securityDialog === "set-pin";
+    const response = await fetch(`/api/projects/${projectId}${settingPin ? "/password" : ""}`, { method: settingPin ? "POST" : "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin: securityPin || undefined }) });
+    if (!response.ok) {
+      setSecurityError(settingPin ? "비밀번호를 설정하지 못했습니다." : hasPassword ? "비밀번호가 올바르지 않습니다." : "프로젝트를 삭제하지 못했습니다.");
+      setSecurityLoading(false);
+      return;
+    }
+    setSecurityDialog(null);
+    setSecurityLoading(false);
+    if (settingPin) {
+      setSaveStatus("비밀번호 설정됨");
+      router.refresh();
+    } else {
+      router.push("/projects");
+      router.refresh();
+    }
+  }
+
   async function restoreSavedSnapshot(snapshot: SavedProjectSnapshot) {
     if (
       !window.confirm(
@@ -1785,7 +2254,7 @@ export function Playground() {
     setSaveStatus("스냅샷 복원 중");
     try {
       const response = await fetch(
-        `/api/projects/demo/snapshots/${snapshot.id}`,
+        `/api/projects/${projectId}/snapshots/${snapshot.id}`,
         { method: "POST" },
       );
       if (!response.ok) throw new Error("스냅샷을 복원하지 못했습니다.");
@@ -1846,35 +2315,15 @@ export function Playground() {
     };
   }
 
-  function overlapsAnother(
-    current: CanvasItem[],
-    itemId: string,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-  ) {
-    const gap = 10;
-    return current.some((other, index) => {
-      if (other.id === itemId) return false;
-      const position = itemPosition(other, index);
-      const size = renderedItemSize(other.id, other.kind);
-      return (
-        x < position.x + size.width + gap &&
-        x + width + gap > position.x &&
-        y < position.y + size.height + gap &&
-        y + height + gap > position.y
-      );
-    });
-  }
-
   useEffect(() => {
+    if (!projectId) return;
     let cancelled = false;
-    fetch(`/api/projects/demo?loadedAt=${Date.now()}`, { cache: "no-store" })
+    fetch(`/api/projects/${projectId}?loadedAt=${Date.now()}`, { cache: "no-store" })
       .then(async (response) => {
         if (!response.ok) throw new Error("프로젝트를 불러오지 못했습니다.");
         return response.json() as Promise<{
           project?: {
+            name?: string;
             document?: {
               schemaVersion?: number;
               items?: CanvasItem[];
@@ -1892,6 +2341,8 @@ export function Playground() {
       })
       .then((payload) => {
         if (cancelled) return;
+        if (payload.project?.name)
+          setDisplayProjectName(payload.project.name);
         const document = payload.project?.document;
         const hasCurrentDataModel = (document?.schemaVersion ?? 0) >= 7;
         if (Array.isArray(document?.pages) && document.pages.length > 0)
@@ -1902,8 +2353,7 @@ export function Playground() {
         if (document?.canvasView) setCanvasView(document.canvasView);
         if (
           hasCurrentDataModel &&
-          Array.isArray(document?.sheets) &&
-          document.sheets.length > 0
+          Array.isArray(document?.sheets)
         )
           setSheets(document.sheets);
         if (hasCurrentDataModel && document?.dataBinding)
@@ -1939,7 +2389,7 @@ export function Playground() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -2003,14 +2453,14 @@ export function Playground() {
   }, [hydrated]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || !projectId) return;
     if (skipInitialSaveRef.current) {
       skipInitialSaveRef.current = false;
       return;
     }
     const timeout = window.setTimeout(() => {
       setSaveStatus("PostgreSQL에 저장 중");
-      fetch("/api/projects/demo", {
+      fetch(`/api/projects/${projectId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2042,6 +2492,7 @@ export function Playground() {
     displayBindings,
     hydrated,
     pages,
+    projectId,
     sheetRelations,
     sheets,
   ]);
@@ -3053,27 +3504,8 @@ export function Playground() {
           : 0;
       const width = Math.max(100, Math.round(startWidth + horizontal));
       const height = Math.max(36, Math.round(startHeight + vertical));
-      setItems((current) => {
-        const index = current.findIndex(
-          (currentItem) => currentItem.id === item.id,
-        );
-        const position = itemPosition(item, index);
-        const nextWidth =
-          direction === "n" || direction === "s" ? startWidth : width;
-        const nextHeight =
-          direction === "e" || direction === "w" ? startHeight : height;
-        if (
-          overlapsAnother(
-            current,
-            item.id,
-            position.x,
-            position.y,
-            nextWidth,
-            nextHeight,
-          )
-        )
-          return current;
-        return current.map((currentItem) =>
+      setItems((current) =>
+        current.map((currentItem) =>
           currentItem.id === item.id
             ? {
                 ...currentItem,
@@ -3081,8 +3513,8 @@ export function Playground() {
                 ...(direction === "e" || direction === "w" ? {} : { height }),
               }
             : currentItem,
-        );
-      });
+        ),
+      );
     };
     const onEnd = () => {
       window.removeEventListener("pointermove", onMove);
@@ -3110,7 +3542,6 @@ export function Playground() {
     movedItemRef.current = false;
     const index = items.findIndex((candidate) => candidate.id === item.id);
     const origin = itemPosition(item, index);
-    const size = renderedItemSize(item.id, item.kind);
     const startX = event.clientX;
     const startY = event.clientY;
     const zoom = canvasView.zoom;
@@ -3131,13 +3562,9 @@ export function Playground() {
         Math.round(origin.y + (moveEvent.clientY - startY) / zoom),
       );
       setItems((current) =>
-        overlapsAnother(current, item.id, x, y, size.width, size.height)
-          ? current
-          : current.map((currentItem) =>
-              currentItem.id === item.id
-                ? { ...currentItem, x, y }
-                : currentItem,
-            ),
+        current.map((currentItem) =>
+          currentItem.id === item.id ? { ...currentItem, x, y } : currentItem,
+        ),
       );
     };
     const onEnd = () => {
@@ -3165,8 +3592,31 @@ export function Playground() {
     >
       <header className="studio-topbar">
         <div className="studio-title">
-          <Link href="/projects">LCA 데이터 정제</Link>
-          <span>초안</span>
+          {editingProjectName ? (
+            <input
+              className="project-name-input"
+              value={projectNameDraft}
+              maxLength={120}
+              autoFocus
+              aria-label="프로젝트 이름"
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => setProjectNameDraft(event.target.value)}
+              onBlur={saveProjectName}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+                if (event.key === "Escape") cancelProjectRename();
+              }}
+            />
+          ) : (
+            <button
+              className="project-name-button"
+              type="button"
+              title="더블클릭하여 프로젝트 이름 변경"
+              onDoubleClick={startProjectRename}
+            >
+              {displayProjectName}
+            </button>
+          )}
         </div>
         <div className="studio-actions">
           <div
@@ -3181,7 +3631,7 @@ export function Playground() {
               aria-label="이전 편집으로 돌아가기"
               title="이전 편집으로 돌아가기 (⌘Z / Ctrl+Z)"
             >
-              이전
+              <Icons.undo />
             </button>
             <button
               className="button secondary compact history-button"
@@ -3191,27 +3641,50 @@ export function Playground() {
               aria-label="다시 앞으로 가기"
               title="다시 앞으로 가기 (⇧⌘Z / Ctrl+Y)"
             >
-              다시 앞으로
+              <Icons.redo />
             </button>
           </div>
           <span className="saved">
             <Icons.check />
             {saveStatus}
           </span>
+          {!isTemporary && !hasPassword && (
+            <button
+              className="button secondary compact topbar-action-icon"
+              type="button"
+              onClick={() => openSecurityDialog("set-pin")}
+              aria-label="비밀번호 설정"
+              title="비밀번호 설정"
+            >
+              <Icons.lock />
+            </button>
+          )}
+          {!isTemporary && (
+            <button
+              className="button compact topbar-action-icon danger-icon"
+              type="button"
+              onClick={() => openSecurityDialog("delete")}
+              aria-label="프로젝트 삭제"
+              title="프로젝트 삭제"
+            >
+              <Icons.trash />
+            </button>
+          )}
           <button
-            className="button primary compact snapshot-trigger"
+            className={`button primary compact snapshot-trigger${isTemporary ? "" : " topbar-action-icon"}`}
             type="button"
             onClick={saveProjectSnapshot}
             disabled={snapshotLoading || !!restoringSnapshotId}
-            title="현재 프로젝트를 저장하고 스냅샷 기록 남기기"
+            aria-label={isTemporary ? "프로젝트로 저장" : snapshotLoading ? "스냅샷 저장 중" : "스냅샷"}
+            title={isTemporary ? "저장하려면 프로젝트를 만들어야 합니다" : "현재 프로젝트를 저장하고 스냅샷 기록 남기기"}
           >
-            <Icons.clock />
-            {snapshotLoading ? "저장 중" : "스냅샷"}
+            {isTemporary ? <Icons.plus /> : <Icons.clock />}
+            {isTemporary ? "프로젝트로 저장" : null}
           </button>
         </div>
       </header>
 
-      {snapshotPanelOpen && (
+      {!isTemporary && snapshotPanelOpen && (
         <aside className="snapshot-panel" aria-label="프로젝트 스냅샷 기록">
           <header>
             <div>
@@ -3754,6 +4227,24 @@ export function Playground() {
           <div className="sheet-title">
             <Icons.database />
             <strong>데이터</strong>
+            <div className="sheet-view-toggle" aria-label="데이터 보기 방식">
+              <button
+                type="button"
+                className={sheetViewMode === "grid" ? "active" : ""}
+                aria-pressed={sheetViewMode === "grid"}
+                onClick={() => setSheetViewMode("grid")}
+              >
+                시트
+              </button>
+              <button
+                type="button"
+                className={sheetViewMode === "erd" ? "active" : ""}
+                aria-pressed={sheetViewMode === "erd"}
+                onClick={() => setSheetViewMode("erd")}
+              >
+                ERD
+              </button>
+            </div>
             <div className="sheet-window-controls">
               <button
                 type="button"
@@ -3794,11 +4285,30 @@ export function Playground() {
               </button>
             </div>
           </div>
-          {sheets.map((sheet) => (
-            <div
-              key={sheet.id}
-              className={`sheet-tab ${activeSheet.id === sheet.id ? "active" : ""}`}
-            >
+          {sheets.map((sheet) => {
+            const tabRelations = sheetRelations.filter(
+              (relation) =>
+                relation.sourceSheetId === sheet.id ||
+                relation.targetSheetId === sheet.id,
+            );
+            const relationSummary = tabRelations
+              .map((relation) => {
+                const isSource = relation.sourceSheetId === sheet.id;
+                const relatedSheet = sheets.find(
+                  (candidate) =>
+                    candidate.id ===
+                    (isSource
+                      ? relation.targetSheetId
+                      : relation.sourceSheetId),
+                );
+                return `${isSource ? "→" : "←"} ${relatedSheet?.name ?? "삭제된 시트"} (${relation.relationType})`;
+              })
+              .join("\n");
+            return (
+              <div
+                key={sheet.id}
+                className={`sheet-tab ${activeSheet.id === sheet.id ? "active" : ""}`}
+              >
               {editingSheetId === sheet.id ? (
                 <div className="sheet-tab-select sheet-tab-name-editor">
                   <span className="table-dot" />
@@ -3844,12 +4354,19 @@ export function Playground() {
               )}
               {sheets.length > 1 && (
                 <button
-                  className="sheet-tab-relation"
-                  aria-label={`${sheet.name} 관계 설정`}
-                  title="관계 설정"
+                  className={`sheet-tab-relation${tabRelations.length > 0 ? " has-relations" : ""}`}
+                  aria-label={`${sheet.name} 관계 설정${tabRelations.length > 0 ? `, ${tabRelations.length}개 관계` : ""}`}
+                  title={
+                    tabRelations.length > 0
+                      ? `설정된 관계 ${tabRelations.length}개\n${relationSummary}`
+                      : "관계 설정"
+                  }
                   onClick={() => startRelationForSheet(sheet.id)}
                 >
-                  ↔
+                  <span aria-hidden="true">↔</span>
+                  {tabRelations.length > 0 && (
+                    <small aria-hidden="true">{tabRelations.length}</small>
+                  )}
                 </button>
               )}
               <button
@@ -3859,8 +4376,9 @@ export function Playground() {
               >
                 ×
               </button>
-            </div>
-          ))}
+              </div>
+            );
+          })}
           <button
             className="add-sheet"
             onClick={addSheet}
@@ -3921,6 +4439,24 @@ export function Playground() {
             </button>
           </div>
         ) : (
+          sheetViewMode === "erd" ? (
+            <>
+              <SheetErdView
+                sheets={sheets}
+                relations={sheetRelations}
+                activeSheetId={activeSheet.id}
+                onSelectSheet={setActiveSheetId}
+              />
+              <footer className="sheet-footer">
+                <span>
+                  <b>ERD</b> 보기
+                </span>
+                <span>테이블 {sheets.length}개</span>
+                <span>관계 {sheetRelations.length}개</span>
+                <span className="sheet-saved">보기 전용</span>
+              </footer>
+            </>
+          ) : (
           <>
             <div className="sheet-grid-wrap">
               <table className="sheet-grid">
@@ -3999,12 +4535,19 @@ export function Playground() {
                     ))}
                     {activeCalculatedFields.map((field, index) => (
                       <th key={field.id} className="calculated-column">
-                        <span className="field-number">
-                          #{activeSheet.columns.length + index + 1}
-                        </span>
-                        <span className="field-type fx">fx</span>
-                        {field.name}
                         <button
+                          className="calculated-column-details"
+                          aria-label={`${field.name} 계산 조건 보기`}
+                          onClick={() => setInspectingCalculatedField(field)}
+                        >
+                          <span className="field-number">
+                            #{activeSheet.columns.length + index + 1}
+                          </span>
+                          <span className="field-type fx">fx</span>
+                          <span>{field.name}</span>
+                        </button>
+                        <button
+                          className="calculated-column-delete"
                           aria-label={`${field.name} 계산 필드 삭제`}
                           onClick={() => deleteCalculatedField(field)}
                         >
@@ -4240,12 +4783,25 @@ export function Playground() {
               <span>데이터 {activeSheet.rows.length}개</span>
               <span className="sheet-saved">
                 <Icons.check />
-                자동 저장됨
+                {isTemporary ? "임시 데이터" : "자동 저장됨"}
               </span>
             </footer>
           </>
+          )
         )}
       </section>
+      {securityDialog && (
+        <div className="relation-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !securityLoading) setSecurityDialog(null); }}>
+          <section className="security-dialog" role="dialog" aria-modal="true" aria-labelledby="security-dialog-title">
+            <span>{securityDialog === "set-pin" ? "PROJECT SECURITY" : "DELETE PROJECT"}</span>
+            <h2 id="security-dialog-title">{securityDialog === "set-pin" ? "4자리 비밀번호 설정" : "프로젝트 삭제"}</h2>
+            <p>{securityDialog === "set-pin" ? "다음 입장부터 이 비밀번호를 입력해야 합니다." : hasPassword ? "삭제하려면 프로젝트 비밀번호를 다시 입력하세요. 데이터는 소프트 삭제됩니다." : "이 프로젝트를 목록에서 삭제합니다. 데이터는 소프트 삭제됩니다."}</p>
+            {(securityDialog === "set-pin" || hasPassword) && <input type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoFocus aria-label="프로젝트 비밀번호 4자리" value={securityPin} onChange={(event) => setSecurityPin(event.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="••••" onKeyDown={(event) => { if (event.key === "Enter") void submitSecurityDialog(); }} />}
+            {securityError && <small role="alert">{securityError}</small>}
+            <div className="security-dialog-actions"><button className="button secondary" type="button" disabled={securityLoading} onClick={() => setSecurityDialog(null)}>취소</button><button className={`button ${securityDialog === "delete" ? "danger" : "primary"}`} type="button" disabled={securityLoading || ((securityDialog === "set-pin" || hasPassword) && securityPin.length !== 4)} onClick={submitSecurityDialog}>{securityLoading ? "처리 중" : securityDialog === "set-pin" ? "설정하기" : "삭제하기"}</button></div>
+          </section>
+        </div>
+      )}
       {newColumnDraft && (
         <div
           className="relation-modal-backdrop"
@@ -4334,6 +4890,93 @@ export function Playground() {
           </form>
         </div>
       )}
+      {inspectingCalculatedField &&
+        isConditionalSumField(inspectingCalculatedField) &&
+        (() => {
+          const field = inspectingCalculatedField;
+          const resultSheet =
+            sheets.find((sheet) => sheet.id === field.resultSheetId) ??
+            emptySheet;
+          const sourceSheet =
+            sheets.find((sheet) => sheet.id === field.sourceSheetId) ??
+            emptySheet;
+          return (
+            <div
+              className="relation-modal-backdrop"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget)
+                  setInspectingCalculatedField(null);
+              }}
+            >
+              <div
+                className="relation-modal calculation-detail-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${field.name} 계산 조건`}
+              >
+                <header>
+                  <div>
+                    <span className="fx-badge">∑</span>
+                    <strong>{field.name}</strong>
+                  </div>
+                  <button
+                    aria-label="계산 조건 닫기"
+                    onClick={() => setInspectingCalculatedField(null)}
+                  >
+                    ×
+                  </button>
+                </header>
+                <section>
+                  <small>합산 대상</small>
+                  <h2>{sourceSheet.name} · {field.valueColumn}</h2>
+                  <div className="calculation-detail-path">
+                    <span>관계 경로</span>
+                    <strong>
+                      {relationPathLabel(
+                        resultSheet,
+                        field.relationPath,
+                        sheetRelations,
+                        sheets,
+                      )}
+                    </strong>
+                  </div>
+                </section>
+                <section>
+                  <small>적용 조건 · {field.conditions.length}개</small>
+                  <h2>모두 만족하는 행만 합산</h2>
+                  <ol className="calculation-detail-conditions">
+                    {field.conditions.map((condition) => {
+                      const operand =
+                        condition.operand.kind === "literal"
+                          ? condition.operand.value
+                          : `현재 행의 ${condition.operand.column}`;
+                      const hasOperand =
+                        condition.operator !== "isBlank" &&
+                        condition.operator !== "isNotBlank";
+                      return (
+                        <li key={condition.id}>
+                          <span>{condition.column}</span>
+                          <strong>
+                            {conditionalOperatorLabel(condition.operator)}
+                          </strong>
+                          {hasOperand && <em>{operand || "빈 값"}</em>}
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </section>
+                <footer>
+                  <button
+                    className="confirm"
+                    onClick={() => setInspectingCalculatedField(null)}
+                  >
+                    확인
+                  </button>
+                </footer>
+              </div>
+            </div>
+          );
+        })()}
       {conditionalSumDraft &&
         (() => {
           const sourceSheet = sheets.find(

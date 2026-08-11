@@ -1,14 +1,19 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { requestHasProjectAccess } from "@/lib/project-security";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   context: RouteContext<"/api/projects/[id]/snapshots/[snapshotId]">,
 ) {
   const { id, snapshotId } = await context.params;
+  const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (!requestHasProjectAccess(request, id, existing.passwordHash))
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const result = await prisma.$transaction(async (transaction) => {
-    const project = await transaction.project.findUnique({ where: { id } });
+    const project = await transaction.project.findFirst({ where: { id, deletedAt: null } });
     if (!project) return { error: "PROJECT_NOT_FOUND" as const };
     const selected = await transaction.projectSnapshot.findFirst({
       where: { id: snapshotId, projectId: id },

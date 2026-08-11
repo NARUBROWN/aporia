@@ -12,10 +12,13 @@ model Project {
   name      String   @db.Text
   document  Json     @default("{}")
   version   BigInt   @default(1)
+  passwordHash String? @map("password_hash") @db.Text
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   snapshots ProjectSnapshot[]
 
+  @@index([deletedAt])
   @@map("projects")
 }
 

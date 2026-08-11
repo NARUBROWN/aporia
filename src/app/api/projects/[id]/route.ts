@@ -1,5 +1,6 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { isValidPin, requestHasProjectAccess, verifyPin } from "@/lib/project-security";
 
 type DocumentRecord = Record<string, unknown>;
 
@@ -64,16 +65,20 @@ export async function GET(
   context: RouteContext<"/api/projects/[id]">,
 ) {
   const { id } = await context.params;
-  const project = await prisma.project.findUnique({ where: { id } });
+  const project = await prisma.project.findFirst({ where: { id, deletedAt: null } });
 
   if (!project) {
     return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
   }
-
+  if (!requestHasProjectAccess(_request, id, project.passwordHash))
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   return Response.json(
     {
       project: {
-        ...project,
+        id: project.id,
+        name: project.name,
+        document: project.document,
+        createdAt: project.createdAt.toISOString(),
         version: Number(project.version),
         updatedAt: project.updatedAt.toISOString(),
       },
@@ -87,6 +92,10 @@ export async function PUT(
   context: RouteContext<"/api/projects/[id]">,
 ) {
   const { id } = await context.params;
+  const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (existing?.passwordHash && !requestHasProjectAccess(request, id, existing.passwordHash))
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   const raw = await request.text();
 
   if (raw.length > 5_000_000) {
@@ -114,25 +123,42 @@ export async function PUT(
   if (normalized.error) {
     return Response.json(normalized.error, { status: 422 });
   }
+  const requestedName =
+    "name" in body && typeof body.name === "string"
+      ? body.name.trim()
+      : undefined;
+  if ("name" in body && (!requestedName || requestedName.length > 120)) {
+    return Response.json({ error: "INVALID_PROJECT_NAME" }, { status: 400 });
+  }
   const document = normalized.document as Prisma.InputJsonValue;
-  const project = await prisma.project.upsert({
+  const project = await prisma.project.update({
     where: { id },
-    create: {
-      id,
-      name: id === "demo" ? "고객 관리 화면" : "새 프로젝트",
-      document,
-    },
-    update: {
+    data: {
       document,
       version: { increment: 1 },
+      ...(requestedName ? { name: requestedName } : {}),
     },
   });
 
   return Response.json({
     project: {
       id: project.id,
+      name: project.name,
       version: Number(project.version),
       updatedAt: project.updatedAt.toISOString(),
     },
   });
+}
+
+export async function DELETE(request: Request, context: RouteContext<"/api/projects/[id]">) {
+  const { id } = await context.params;
+  const project = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  if (!project) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (project.passwordHash) {
+    const body = await request.json().catch(() => null) as { pin?: unknown } | null;
+    if (!isValidPin(body?.pin) || !verifyPin(body.pin, project.passwordHash))
+      return Response.json({ error: "INVALID_PIN" }, { status: 401 });
+  }
+  await prisma.project.update({ where: { id }, data: { deletedAt: new Date() } });
+  return Response.json({ ok: true });
 }
