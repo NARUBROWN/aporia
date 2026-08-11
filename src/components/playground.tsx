@@ -64,6 +64,7 @@ type SheetRelation = {
   targetSheetId: string;
   targetColumn: string;
   relationType: RelationType;
+  updateOption: "none";
   links: { sourceRowId: string; targetRowId: string }[];
 };
 type RelationDraft = {
@@ -211,7 +212,7 @@ const initialSheets: Sheet[] = [
     columnTypes: ["number", "text", "text", "text", "number", "text", "text"],
     rowIds: ["stg-row-1", "stg-row-2", "stg-row-3", "stg-row-4"],
     rows: [
-      ["1042", "SAP_MM", "1100", "RM-1001", "1,240.5", "KG", "수집 완료"],
+      ["1042", "SAP_MM", "1100", "RM-1001", "1240.5", "KG", "수집 완료"],
       ["1042", "SAP_MM", "1100", "PM-2001", "780", "EA", "수집 완료"],
       ["1042", "SAP_CO", "1200", "RM-1002", "956.8", "KG", "수집 완료"],
       ["1042", "SAP_CO", "1200", "RM-1001", "632.4", "KG", "수집 완료"],
@@ -252,7 +253,7 @@ const initialSheets: Sheet[] = [
     columnTypes: ["text", "number", "number", "text", "text", "number", "text"],
     rowIds: ["fact-row-1", "fact-row-2", "fact-row-3", "fact-row-4"],
     rows: [
-      ["202607", "11", "101", "RM-1001", "물질 투입", "1,240.5", "KG"],
+      ["202607", "11", "101", "RM-1001", "물질 투입", "1240.5", "KG"],
       ["202607", "11", "103", "PM-2001", "포장재 투입", "780", "EA"],
       ["202607", "12", "102", "RM-1002", "물질 투입", "956.8", "KG"],
       ["202607", "12", "101", "RM-1001", "물질 투입", "632.4", "KG"],
@@ -283,6 +284,7 @@ const initialSheetRelations: SheetRelation[] = [
     targetSheetId: "dim-master",
     targetColumn: "자재 번호",
     relationType: "N:1",
+    updateOption: "none",
     links: [
       { sourceRowId: "stg-row-1", targetRowId: "dim-row-1" },
       { sourceRowId: "stg-row-2", targetRowId: "dim-row-3" },
@@ -297,6 +299,7 @@ const initialSheetRelations: SheetRelation[] = [
     targetSheetId: "fact-flow",
     targetColumn: "자재 ID",
     relationType: "1:N",
+    updateOption: "none",
     links: [
       { sourceRowId: "dim-row-1", targetRowId: "fact-row-1" },
       { sourceRowId: "dim-row-1", targetRowId: "fact-row-4" },
@@ -414,6 +417,14 @@ function parseNumericValue(value: string) {
   const normalized = value.replace(/[^0-9.-]/g, "");
   const number = Number(normalized);
   return normalized && Number.isFinite(number) ? number : null;
+}
+
+function numberInputValue(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (!/^-?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?$/.test(trimmed)) return "";
+  const normalized = trimmed.replaceAll(",", "");
+  return Number.isFinite(Number(normalized)) ? normalized : "";
 }
 
 function numericColumns(sheet: Sheet) {
@@ -1459,7 +1470,12 @@ export function Playground() {
         if (hasCurrentDataModel && document?.displayBindings)
           setDisplayBindings(document.displayBindings);
         if (hasCurrentDataModel && Array.isArray(document?.sheetRelations))
-          setSheetRelations(document.sheetRelations);
+          setSheetRelations(
+            document.sheetRelations.map((relation) => ({
+              ...relation,
+              updateOption: "none",
+            })),
+          );
         if (hasCurrentDataModel && Array.isArray(document?.calculatedFields))
           setCalculatedFields(
             document.calculatedFields.filter(
@@ -1757,8 +1773,12 @@ export function Playground() {
   }
 
   function updateCell(rowIndex: number, columnIndex: number, value: string) {
-    setSheets((current) => {
-      const nextSheets = current.map((sheet) =>
+    const nextValue =
+      activeSheet.columnTypes?.[columnIndex] === "number"
+        ? numberInputValue(value)
+        : value;
+    setSheets((current) =>
+      current.map((sheet) =>
         sheet.id !== activeSheet.id
           ? sheet
           : {
@@ -1767,19 +1787,12 @@ export function Playground() {
                 index !== rowIndex
                   ? row
                   : row.map((cell, cellIndex) =>
-                      cellIndex === columnIndex ? value : cell,
+                      cellIndex === columnIndex ? nextValue : cell,
                     ),
               ),
             },
-      );
-      setSheetRelations((relations) =>
-        relations.map((relation) => ({
-          ...relation,
-          links: buildRelationLinks(relation, nextSheets),
-        })),
-      );
-      return nextSheets;
-    });
+      ),
+    );
   }
 
   function addRow() {
@@ -2020,6 +2033,7 @@ export function Playground() {
       id: crypto.randomUUID(),
       ...relationDraft,
       relationType: relationDraft.relationType,
+      updateOption: "none" as const,
     };
     const relation: SheetRelation = {
       ...relationWithoutLinks,
@@ -3230,7 +3244,24 @@ export function Playground() {
                                     : "text"
                               }
                               aria-label={`${rowIndex + 1}행 ${column}`}
-                              value={row[columnIndex] ?? ""}
+                              step={
+                                activeSheet.columnTypes?.[columnIndex] ===
+                                "number"
+                                  ? "any"
+                                  : undefined
+                              }
+                              inputMode={
+                                activeSheet.columnTypes?.[columnIndex] ===
+                                "number"
+                                  ? "decimal"
+                                  : undefined
+                              }
+                              value={
+                                activeSheet.columnTypes?.[columnIndex] ===
+                                "number"
+                                  ? numberInputValue(row[columnIndex] ?? "")
+                                  : (row[columnIndex] ?? "")
+                              }
                               onChange={(event) =>
                                 updateCell(
                                   rowIndex,

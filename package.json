@@ -7,7 +7,7 @@
     "predev": "prisma db push && prisma generate",
     "dev": "next dev",
     "build": "next build --webpack",
-    "prestart": "prisma db push && prisma generate",
+    "prestart": "prisma generate",
     "start": "next start",
     "lint": "eslint",
     "db:generate": "prisma generate",

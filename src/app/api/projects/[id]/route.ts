@@ -1,6 +1,64 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 
+type DocumentRecord = Record<string, unknown>;
+
+function normalizeNumber(value: unknown) {
+  if (typeof value === "number")
+    return Number.isFinite(value) ? String(value) : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (!/^-?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?$/.test(trimmed))
+    return null;
+  const normalized = trimmed.replaceAll(",", "");
+  return Number.isFinite(Number(normalized)) ? normalized : null;
+}
+
+function normalizeDocumentNumbers(document: DocumentRecord) {
+  const sheets = document.sheets;
+  if (!Array.isArray(sheets)) return { document };
+
+  for (const sheet of sheets) {
+    if (!sheet || typeof sheet !== "object") continue;
+    const record = sheet as DocumentRecord;
+    const columns = record.columns;
+    const columnTypes = record.columnTypes;
+    const rows = record.rows;
+    if (
+      !Array.isArray(columns) ||
+      !Array.isArray(columnTypes) ||
+      !Array.isArray(rows)
+    )
+      continue;
+
+    for (let columnIndex = 0; columnIndex < columnTypes.length; columnIndex++) {
+      if (columnTypes[columnIndex] !== "number") continue;
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        const row = rows[rowIndex];
+        if (!Array.isArray(row)) continue;
+        const normalized = normalizeNumber(row[columnIndex]);
+        if (normalized === null) {
+          return {
+            error: {
+              code: "INVALID_NUMBER_CELL",
+              sheet: typeof record.name === "string" ? record.name : "",
+              column:
+                typeof columns[columnIndex] === "string"
+                  ? columns[columnIndex]
+                  : "",
+              row: rowIndex + 1,
+              value: row[columnIndex],
+            },
+          };
+        }
+        row[columnIndex] = normalized;
+      }
+    }
+  }
+  return { document };
+}
+
 export async function GET(
   _request: Request,
   context: RouteContext<"/api/projects/[id]">,
@@ -52,7 +110,11 @@ export async function PUT(
     return Response.json({ error: "INVALID_DOCUMENT" }, { status: 400 });
   }
 
-  const document = body.document as Prisma.InputJsonValue;
+  const normalized = normalizeDocumentNumbers(body.document as DocumentRecord);
+  if (normalized.error) {
+    return Response.json(normalized.error, { status: 422 });
+  }
+  const document = normalized.document as Prisma.InputJsonValue;
   const project = await prisma.project.upsert({
     where: { id },
     create: {

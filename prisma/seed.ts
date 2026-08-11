@@ -969,6 +969,7 @@ function relation(
     targetSheetId,
     targetColumn,
     relationType,
+    updateOption: "none",
     links,
   };
 }
