@@ -199,7 +199,15 @@ const initialSheets: Sheet[] = [
   {
     id: "stg-source",
     name: "STG · 원천 수집",
-    columns: ["배치 번호", "원천 시스템", "플랜트 코드", "자재 번호", "원천 값", "단위", "상태"],
+    columns: [
+      "배치 번호",
+      "원천 시스템",
+      "플랜트 코드",
+      "자재 번호",
+      "원천 값",
+      "단위",
+      "상태",
+    ],
     columnTypes: ["number", "text", "text", "text", "number", "text", "text"],
     rowIds: ["stg-row-1", "stg-row-2", "stg-row-3", "stg-row-4"],
     rows: [
@@ -212,7 +220,14 @@ const initialSheets: Sheet[] = [
   {
     id: "dim-master",
     name: "DIM · 기준정보",
-    columns: ["자재 ID", "자재 번호", "자재명", "자재 유형", "사업장 ID", "사업장명"],
+    columns: [
+      "자재 ID",
+      "자재 번호",
+      "자재명",
+      "자재 유형",
+      "사업장 ID",
+      "사업장명",
+    ],
     columnTypes: ["number", "text", "text", "text", "number", "text"],
     rowIds: ["dim-row-1", "dim-row-2", "dim-row-3", "dim-row-4"],
     rows: [
@@ -225,7 +240,15 @@ const initialSheets: Sheet[] = [
   {
     id: "fact-flow",
     name: "FACT · 정제 실적",
-    columns: ["기간", "사업장 ID", "자재 ID", "자재 번호", "실적 유형", "수량", "단위"],
+    columns: [
+      "기간",
+      "사업장 ID",
+      "자재 ID",
+      "자재 번호",
+      "실적 유형",
+      "수량",
+      "단위",
+    ],
     columnTypes: ["text", "number", "number", "text", "text", "number", "text"],
     rowIds: ["fact-row-1", "fact-row-2", "fact-row-3", "fact-row-4"],
     rows: [
@@ -1288,6 +1311,7 @@ export function Playground() {
     },
   });
   const [hydrated, setHydrated] = useState(false);
+  const skipInitialSaveRef = useRef(true);
   const [saveStatus, setSaveStatus] = useState("데이터베이스 연결 중");
   const nextId = useRef(1);
   const panRef = useRef<{
@@ -1458,6 +1482,10 @@ export function Playground() {
 
   useEffect(() => {
     if (!hydrated) return;
+    if (skipInitialSaveRef.current) {
+      skipInitialSaveRef.current = false;
+      return;
+    }
     const timeout = window.setTimeout(() => {
       setSaveStatus("PostgreSQL에 저장 중");
       fetch("/api/projects/demo", {

@@ -1,0 +1,10 @@
+CREATE TABLE "projects" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "document" JSONB NOT NULL DEFAULT '{}',
+    "version" BIGINT NOT NULL DEFAULT 1,
+    "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "projects_pkey" PRIMARY KEY ("id")
+);
