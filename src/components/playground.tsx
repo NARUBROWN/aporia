@@ -612,9 +612,10 @@ function relationAllowsSingleRowFrom(
 function relationHasAtMostOneLinkFrom(
   relation: SheetRelation,
   fromSheetId: string,
+  sheets: Sheet[],
 ) {
   const counts = new Map<string, number>();
-  relation.links.forEach((link) => {
+  buildRelationLinks(relation, sheets).forEach((link) => {
     const rowId =
       relation.sourceSheetId === fromSheetId
         ? link.sourceRowId
@@ -636,7 +637,7 @@ function reachableSheetsFrom(
     relations.forEach((relation) => {
       if (
         !relationAllowsSingleRowFrom(relation, current.sheet.id) ||
-        !relationHasAtMostOneLinkFrom(relation, current.sheet.id)
+        !relationHasAtMostOneLinkFrom(relation, current.sheet.id, sheets)
       )
         return;
       const nextSheetId =
@@ -693,6 +694,7 @@ function traverseRelatedRows(
   startRowId: string,
   relationPath: string[],
   relations: SheetRelation[],
+  sheets: Sheet[],
 ) {
   let currentSheetId = startSheetId;
   let currentRowIds = [startRowId];
@@ -706,9 +708,10 @@ function traverseRelatedRows(
       return { sheetId: currentSheetId, rowIds: [] };
     const fromSource = relation.sourceSheetId === currentSheetId;
     const rowIds = new Set(currentRowIds);
+    const currentLinks = buildRelationLinks(relation, sheets);
     currentRowIds = [
       ...new Set(
-        relation.links.flatMap((link) => {
+        currentLinks.flatMap((link) => {
           const fromRowId = fromSource ? link.sourceRowId : link.targetRowId;
           if (!rowIds.has(fromRowId)) return [];
           return [fromSource ? link.targetRowId : link.sourceRowId];
@@ -756,6 +759,7 @@ function conditionRowsForAggregateRow(
   aggregateRowId: string,
   resultRowId: string,
   relations: SheetRelation[],
+  sheets: Sheet[],
 ) {
   const conditionPath = condition.relationPath ?? field.relationPath;
   if (relationPathStartsWith(conditionPath, field.relationPath))
@@ -764,12 +768,14 @@ function conditionRowsForAggregateRow(
       aggregateRowId,
       conditionPath.slice(field.relationPath.length),
       relations,
+      sheets,
     );
   return traverseRelatedRows(
     field.resultSheetId,
     resultRowId,
     conditionPath,
     relations,
+    sheets,
   );
 }
 
@@ -787,6 +793,7 @@ function calculateConditionalSum(
     resultRowId,
     field.relationPath,
     relations,
+    sheets,
   );
   if (traversed.sheetId !== field.sourceSheetId) return "연결 없음";
   const resultRowIndex = resultSheet.rowIds.indexOf(resultRowId);
@@ -807,6 +814,7 @@ function calculateConditionalSum(
         rowId,
         resultRowId,
         relations,
+        sheets,
       );
       if (conditionRows.sheetId !== conditionSheetId) return false;
       const right =
@@ -862,7 +870,11 @@ function calculateFieldValue(
   relations: SheetRelation[],
   sheets: Sheet[],
   resultRowId: string,
-) {
+  calculatedFields: CalculatedField[] = [],
+  resolvingFieldIds: Set<string> = new Set(),
+): string {
+  if (resolvingFieldIds.has(field.id)) return "순환 참조";
+  const nextResolvingFieldIds = new Set(resolvingFieldIds).add(field.id);
   if (isConditionalSumField(field))
     return calculateConditionalSum(field, relations, sheets, resultRowId);
   const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
@@ -926,12 +938,13 @@ function calculateFieldValue(
           relation.targetSheetId !== currentSheetId)
       )
         return "연결 없음";
+      const currentLinks = buildRelationLinks(relation, sheets);
       const relatedRowIds =
         relation.sourceSheetId === currentSheetId
-          ? relation.links
+          ? currentLinks
               .filter((link) => link.sourceRowId === currentRowId)
               .map((link) => link.targetRowId)
-          : relation.links
+          : currentLinks
               .filter((link) => link.targetRowId === currentRowId)
               .map((link) => link.sourceRowId);
       if (relatedRowIds.length > 1) return "계산 불가";
@@ -943,9 +956,22 @@ function calculateFieldValue(
     }
     if (currentSheetId !== token.sheetId) return "연결 없음";
     const rowIndex = sheet.rowIds.indexOf(currentRowId);
-    const number = parseNumericValue(
-      sheet?.rows[rowIndex]?.[sheet.columns.indexOf(token.column)] ?? "",
+    const referencedField = calculatedFields.find(
+      (item) =>
+        item.resultSheetId === token.sheetId && item.name === token.column,
     );
+    const rawValue: string = referencedField
+      ? calculateFieldValue(
+          referencedField,
+          relations,
+          sheets,
+          currentRowId,
+          calculatedFields,
+          nextResolvingFieldIds,
+        )
+      : (sheet?.rows[rowIndex]?.[sheet.columns.indexOf(token.column)] ?? "");
+    if (rawValue === "순환 참조") return rawValue;
+    const number = parseNumericValue(rawValue);
     if (number === null) return "숫자 필요";
     values.push(number);
   }
@@ -1079,13 +1105,10 @@ function RenderItem({
                       {calculated
                         ? calculateFieldValue(
                             calculated,
-                            sheetRelations.filter((relation) =>
-                              calculatedFieldRelationIds(calculated).includes(
-                                relation.id,
-                              ),
-                            ),
+                            sheetRelations,
                             sheets,
                             sheet.rowIds[index],
+                            calculatedFields,
                           )
                         : sheetRow[sheet.columns.indexOf(field)]}
                     </td>
@@ -1967,6 +1990,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     useState<ConditionalSumDraft | null>(null);
   const [inspectingCalculatedField, setInspectingCalculatedField] =
     useState<CalculatedField | null>(null);
+  const [developerSpecOpen, setDeveloperSpecOpen] = useState(false);
   const [propertyTab, setPropertyTab] = useState<"design" | "data" | "action">(
     "design",
   );
@@ -2044,6 +2068,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const activeCalculatedFields = calculatedFields.filter(
     (field) => field.resultSheetId === activeSheet.id,
   );
+  const numericFieldNames = (sheet: Sheet) => [
+    ...numericColumns(sheet),
+    ...calculatedFields
+      .filter((field) => field.resultSheetId === sheet.id)
+      .map((field) => field.name),
+  ];
   const allActiveRelations = sheetRelations.filter(
     (relation) =>
       relation.sourceSheetId === activeSheet.id ||
@@ -2055,15 +2085,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     sheets,
   );
   const calculableSheetPaths = reachableSheetPaths.filter(
-    ({ sheet }) => numericColumns(sheet).length > 0,
+    ({ sheet }) => numericFieldNames(sheet).length > 0,
   );
   const calculableRelations = sheetRelations.filter((relation) =>
     reachableSheetPaths.some(({ relationPath }) =>
       relationPath.includes(relation.id),
     ),
   );
-  const canCreateCalculation =
-    reachableSheetPaths.length > 1 && calculableSheetPaths.length > 0;
+  const canCreateCalculation = calculableSheetPaths.length > 0;
   const conditionalSheetPaths = aggregateReachableSheetsFrom(
     activeSheet,
     sheetRelations,
@@ -3136,7 +3165,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     if (!canCreateCalculation) return;
     const availableFields = calculableSheetPaths.flatMap(
       ({ sheet, relationPath }) =>
-        numericColumns(sheet).map((column) => ({
+        numericFieldNames(sheet).map((column) => ({
           sheet,
           column,
           relationPath,
@@ -3215,13 +3244,19 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   function saveConditionalSum() {
     if (!conditionalSumDraft?.name.trim()) return;
+    const name = conditionalSumDraft.name.trim();
+    if (
+      activeSheet.columns.includes(name) ||
+      activeCalculatedFields.some((field) => field.name === name)
+    )
+      return;
     setCalculatedFields((current) => [
       ...current,
       {
         ...conditionalSumDraft,
         id: crypto.randomUUID(),
         kind: "conditionalSum",
-        name: conditionalSumDraft.name.trim(),
+        name,
       },
     ]);
     setConditionalSumDraft(null);
@@ -3240,7 +3275,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const nextReachable =
       calculableSheetPaths[(currentIndex + 1) % calculableSheetPaths.length];
     const nextColumn = nextReachable
-      ? (numericColumns(nextReachable.sheet)[0] ?? "")
+      ? (numericFieldNames(nextReachable.sheet)[0] ?? "")
       : "";
     if (!nextReachable || !nextColumn) return;
     setCalculationDraft(
@@ -3302,11 +3337,17 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   function saveCalculatedField() {
     if (!calculationDraft?.name.trim()) return;
+    const name = calculationDraft.name.trim();
+    if (
+      activeSheet.columns.includes(name) ||
+      activeCalculatedFields.some((field) => field.name === name)
+    )
+      return;
     setCalculatedFields((current) => [
       ...current,
       {
         id: crypto.randomUUID(),
-        name: calculationDraft.name.trim(),
+        name,
         resultSheetId: activeSheet.id,
         relationIds: calculationDraft.relationIds,
         formula: calculationDraft.formula,
@@ -3316,6 +3357,24 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   }
 
   function deleteCalculatedField(field: CalculatedField) {
+    const dependents = calculatedFields.filter(
+      (candidate) =>
+        !isConditionalSumField(candidate) &&
+        candidate.formula.some(
+          (token) =>
+            token.kind === "field" &&
+            token.sheetId === field.resultSheetId &&
+            token.column === field.name,
+        ),
+    );
+    if (dependents.length > 0) {
+      window.alert(
+        `'${field.name}'을(를) 사용하는 계산 컬럼: ${dependents
+          .map((item) => item.name)
+          .join(", ")}`,
+      );
+      return;
+    }
     if (!window.confirm(`'${field.name}' 계산 필드를 삭제할까요?`)) return;
     setCalculatedFields((current) =>
       current.filter((item) => item.id !== field.id),
@@ -4607,7 +4666,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       <th key={field.id} className="calculated-column">
                         <button
                           className="calculated-column-details"
-                          aria-label={`${field.name} 계산 조건 보기`}
+                          aria-label={`${field.name} 계산식 보기`}
                           onClick={() => setInspectingCalculatedField(field)}
                         >
                           <span className="field-number">
@@ -4657,12 +4716,15 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                             disabled={!canCreateConditionalSum}
                             onClick={() => {
                               const target = aggregateSheetPaths[0]!;
+                              const valueColumn = numericColumns(
+                                target.sheet,
+                              )[0]!;
                               setConditionalSumDraft({
-                                name: `${target.sheet.name} 조건부 합계`,
+                                name: `${target.sheet.name} ${valueColumn} 합계`,
                                 resultSheetId: activeSheet.id,
                                 sourceSheetId: target.sheet.id,
                                 relationPath: target.relationPath,
-                                valueColumn: numericColumns(target.sheet)[0]!,
+                                valueColumn,
                                 conditions: [
                                   {
                                     id: crypto.randomUUID(),
@@ -4679,10 +4741,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                           >
                             <span className="field-menu-icon fx">∑</span>
                             <span>
-                              <strong>조건부 합계</strong>
+                              <strong>조건에 맞는 값 더하기</strong>
                               <small>
                                 {canCreateConditionalSum
-                                  ? "관계로 연결된 여러 행에 업무 조건을 적용해 합산해요"
+                                  ? "현재 시트의 각 행마다 연결된 데이터를 찾아 더해요"
                                   : "먼저 숫자 필드가 있는 시트와 관계를 만들어주세요"}
                               </small>
                             </span>
@@ -4792,19 +4854,15 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                         );
                       })}
                       {activeCalculatedFields.map((field) => {
-                        const relations = sheetRelations.filter((item) =>
-                          calculatedFieldRelationIds(field).includes(item.id),
-                        );
                         return (
                           <td key={field.id} className="calculated-cell">
-                            {relations.length > 0
-                              ? calculateFieldValue(
-                                  field,
-                                  relations,
-                                  sheets,
-                                  activeSheet.rowIds[rowIndex],
-                                )
-                              : "연결 없음"}
+                            {calculateFieldValue(
+                              field,
+                              sheetRelations,
+                              sheets,
+                              activeSheet.rowIds[rowIndex],
+                              calculatedFields,
+                            )}
                           </td>
                         );
                       })}
@@ -4848,6 +4906,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   이름 변경
                 </button>
               )}
+              <button
+                className="sheet-footer-action developer-spec-trigger"
+                onClick={() => setDeveloperSpecOpen(true)}
+              >
+                개발 명세 보기
+              </button>
               <span>
                 필드{" "}
                 {activeSheet.columns.length + activeCalculatedFields.length}개
@@ -4862,6 +4926,235 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           )
         )}
       </section>
+      {developerSpecOpen &&
+        (() => {
+          const fieldsByName = new Map(
+            activeCalculatedFields.map((field) => [field.name, field]),
+          );
+          const orderedFields: CalculatedField[] = [];
+          const visited = new Set<string>();
+          const visit = (field: CalculatedField) => {
+            if (visited.has(field.id)) return;
+            visited.add(field.id);
+            if (!isConditionalSumField(field))
+              field.formula.forEach((token) => {
+                if (token.kind !== "field" || token.sheetId !== activeSheet.id)
+                  return;
+                const dependency = fieldsByName.get(token.column);
+                if (dependency) visit(dependency);
+              });
+            orderedFields.push(field);
+          };
+          activeCalculatedFields.forEach(visit);
+          const activeRelations = sheetRelations.filter(
+            (relation) =>
+              relation.sourceSheetId === activeSheet.id ||
+              relation.targetSheetId === activeSheet.id,
+          );
+          return (
+            <div
+              className="relation-modal-backdrop"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget)
+                  setDeveloperSpecOpen(false);
+              }}
+            >
+              <div
+                className="relation-modal developer-spec-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${activeSheet.name} 개발 명세`}
+              >
+                <header>
+                  <div>
+                    <span className="developer-spec-badge">DEV</span>
+                    <strong>{activeSheet.name} 개발 명세</strong>
+                  </div>
+                  <button
+                    aria-label="개발 명세 닫기"
+                    onClick={() => setDeveloperSpecOpen(false)}
+                  >
+                    ×
+                  </button>
+                </header>
+                <section className="developer-spec-summary">
+                  <small>구현 대상</small>
+                  <h2>{activeSheet.name} 시트</h2>
+                  <p>
+                    일반 필드 {activeSheet.columns.length}개, 관계 {activeRelations.length}개,
+                    계산 규칙 {activeCalculatedFields.length}개를 구현합니다.
+                  </p>
+                  <div>
+                    <span>행 단위 데이터 모델</span>
+                    <span>관계 기반 참조</span>
+                    <span>계산 순서 포함</span>
+                  </div>
+                </section>
+                <section>
+                  <small>1. 데이터 구조</small>
+                  <h2>필드 명세</h2>
+                  <div className="developer-spec-table-wrap">
+                    <table className="developer-spec-table">
+                      <thead>
+                        <tr>
+                          <th>필드</th>
+                          <th>종류</th>
+                          <th>설명</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {activeSheet.columns.map((column, index) => (
+                          <tr key={column}>
+                            <td>{column}</td>
+                            <td>{columnTypeLabel(columnType(activeSheet, index))}</td>
+                            <td>사용자가 입력하거나 외부 데이터에서 저장하는 값</td>
+                          </tr>
+                        ))}
+                        {activeCalculatedFields.map((field) => (
+                          <tr key={field.id}>
+                            <td>{field.name}</td>
+                            <td>계산 결과</td>
+                            <td>
+                              {isConditionalSumField(field)
+                                ? "조건에 맞는 연결 데이터의 합계"
+                                : "다른 필드를 참조한 파생 값"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+                <section>
+                  <small>2. 데이터 관계</small>
+                  <h2>연결해야 하는 시트</h2>
+                  {activeRelations.length === 0 ? (
+                    <p className="developer-spec-empty">연결된 시트가 없습니다.</p>
+                  ) : (
+                    <div className="developer-spec-relations">
+                      {activeRelations.map((relation) => {
+                        const source = sheets.find(
+                          (sheet) => sheet.id === relation.sourceSheetId,
+                        );
+                        const target = sheets.find(
+                          (sheet) => sheet.id === relation.targetSheetId,
+                        );
+                        return (
+                          <div key={relation.id}>
+                            <strong>
+                              {source?.name} · {relation.sourceColumn}
+                            </strong>
+                            <span>{relation.relationType}</span>
+                            <strong>
+                              {target?.name} · {relation.targetColumn}
+                            </strong>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+                <section>
+                  <small>3. 비즈니스 계산 규칙</small>
+                  <h2>계산 순서와 기대 결과</h2>
+                  {orderedFields.length === 0 ? (
+                    <p className="developer-spec-empty">계산 규칙이 없습니다.</p>
+                  ) : (
+                    <ol className="developer-spec-rules">
+                      {orderedFields.map((field, fieldIndex) => (
+                        <li key={field.id}>
+                          <div className="developer-spec-rule-title">
+                            <span>{fieldIndex + 1}</span>
+                            <strong>{field.name}</strong>
+                            <em>
+                              {isConditionalSumField(field)
+                                ? "조건 합계"
+                                : "파생 계산"}
+                            </em>
+                          </div>
+                          {isConditionalSumField(field) ? (
+                            <div className="developer-spec-formula">
+                              <b>
+                                {relationPathLabel(
+                                  activeSheet,
+                                  field.relationPath,
+                                  sheetRelations,
+                                  sheets,
+                                )} · {field.valueColumn} 합계
+                              </b>
+                              {field.conditions.map((condition) => (
+                                <p key={condition.id}>
+                                  조건: {relationPathLabel(
+                                    activeSheet,
+                                    condition.relationPath ?? field.relationPath,
+                                    sheetRelations,
+                                    sheets,
+                                  )} · {condition.column} {conditionalOperatorLabel(condition.operator)}{" "}
+                                  {condition.operand.kind === "literal"
+                                    ? condition.operand.value
+                                    : `현재 행의 ${condition.operand.column}`}
+                                </p>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="developer-spec-formula formula-inline">
+                              {field.formula.map((token, tokenIndex) =>
+                                token.kind === "operator" ? (
+                                  <span key={tokenIndex}>
+                                    {token.operator === "*"
+                                      ? "×"
+                                      : token.operator === "/"
+                                        ? "÷"
+                                        : token.operator === "-"
+                                          ? "−"
+                                          : "+"}
+                                  </span>
+                                ) : (
+                                  <b key={tokenIndex}>
+                                    {relationPathLabel(
+                                      activeSheet,
+                                      token.relationPath ?? [],
+                                      sheetRelations,
+                                      sheets,
+                                    )} · {token.column}
+                                  </b>
+                                ),
+                              )}
+                            </div>
+                          )}
+                          <div className="developer-spec-samples">
+                            {activeSheet.rowIds.slice(0, 3).map((rowId, index) => (
+                              <span key={rowId}>
+                                {activeSheet.rows[index]?.[0] || `${index + 1}행`}
+                                <strong>
+                                  {calculateFieldValue(
+                                    field,
+                                    sheetRelations,
+                                    sheets,
+                                    rowId,
+                                    calculatedFields,
+                                  )}
+                                </strong>
+                              </span>
+                            ))}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
+                <footer>
+                  <button
+                    className="confirm"
+                    onClick={() => setDeveloperSpecOpen(false)}
+                  >
+                    확인
+                  </button>
+                </footer>
+              </div>
+            </div>
+          );
+        })()}
       {securityDialog && (
         <div className="relation-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !securityLoading) setSecurityDialog(null); }}>
           <section className="security-dialog" role="dialog" aria-modal="true" aria-labelledby="security-dialog-title">
@@ -4999,10 +5292,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </button>
                 </header>
                 <section>
-                  <small>합산 대상</small>
+                  <small>더할 값</small>
                   <h2>{sourceSheet.name} · {field.valueColumn}</h2>
                   <div className="calculation-detail-path">
-                    <span>관계 경로</span>
+                    <span>현재 행에서 찾을 데이터</span>
                     <strong>
                       {relationPathLabel(
                         resultSheet,
@@ -5014,8 +5307,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </div>
                 </section>
                 <section>
-                  <small>적용 조건 · {field.conditions.length}개</small>
-                  <h2>모두 만족하는 행만 합산</h2>
+                  <small>더할 데이터 조건 · {field.conditions.length}개</small>
+                  <h2>아래 조건을 모두 만족할 때만 더함</h2>
                   <ol className="calculation-detail-conditions">
                     {field.conditions.map((condition) => {
                       const conditionPath =
@@ -5045,6 +5338,114 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       );
                     })}
                   </ol>
+                </section>
+                <footer>
+                  <button
+                    className="confirm"
+                    onClick={() => setInspectingCalculatedField(null)}
+                  >
+                    확인
+                  </button>
+                </footer>
+              </div>
+            </div>
+          );
+        })()}
+      {inspectingCalculatedField &&
+        !isConditionalSumField(inspectingCalculatedField) &&
+        (() => {
+          const field = inspectingCalculatedField;
+          const resultSheet =
+            sheets.find((sheet) => sheet.id === field.resultSheetId) ??
+            emptySheet;
+          const preview = resultSheet.rowIds.slice(0, 5).map((rowId, index) => ({
+            rowId,
+            label: resultSheet.rows[index]?.[0] ?? `${index + 1}번 데이터`,
+            value: calculateFieldValue(
+              field,
+              sheetRelations,
+              sheets,
+              rowId,
+              calculatedFields,
+            ),
+          }));
+          return (
+            <div
+              className="relation-modal-backdrop"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget)
+                  setInspectingCalculatedField(null);
+              }}
+            >
+              <div
+                className="relation-modal calculation-detail-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${field.name} 계산식`}
+              >
+                <header>
+                  <div>
+                    <span className="fx-badge">fx</span>
+                    <strong>{field.name}</strong>
+                  </div>
+                  <button
+                    aria-label="계산식 닫기"
+                    onClick={() => setInspectingCalculatedField(null)}
+                  >
+                    ×
+                  </button>
+                </header>
+                <section>
+                  <small>계산식</small>
+                  <h2>각 행에 아래 계산을 적용합니다</h2>
+                  <div className="calculation-sentence calculation-detail-formula">
+                    {field.formula.map((token, index) => {
+                      if (token.kind === "operator")
+                        return (
+                          <span key={index}>
+                            {token.operator === "*"
+                              ? "×"
+                              : token.operator === "/"
+                                ? "÷"
+                                : token.operator === "-"
+                                  ? "−"
+                                  : "+"}
+                          </span>
+                        );
+                      const referencedSheet =
+                        sheets.find((sheet) => sheet.id === token.sheetId) ??
+                        emptySheet;
+                      const derived = calculatedFields.some(
+                        (candidate) =>
+                          candidate.resultSheetId === token.sheetId &&
+                          candidate.name === token.column,
+                      );
+                      return (
+                        <b key={index}>
+                          {relationPathLabel(
+                            resultSheet,
+                            token.relationPath ?? [],
+                            sheetRelations,
+                            sheets,
+                          ) || referencedSheet.name}{" "}
+                          · {token.column}
+                          {derived && <em>계산 결과</em>}
+                        </b>
+                      );
+                    })}
+                  </div>
+                </section>
+                <section>
+                  <small>행별 결과</small>
+                  <h2>현재 데이터로 계산한 값입니다</h2>
+                  <div className="calculation-preview">
+                    {preview.map((item) => (
+                      <div key={item.rowId}>
+                        <span>{item.label}</span>
+                        <strong>{item.value || "빈 값"}</strong>
+                      </div>
+                    ))}
+                  </div>
                 </section>
                 <footer>
                   <button
@@ -5093,28 +5494,28 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 className="relation-modal calculation-modal conditional-sum-modal"
                 role="dialog"
                 aria-modal="true"
-                aria-label="조건부 합계 만들기"
+                aria-label="조건에 맞는 값 더하기"
               >
                 <header>
                   <div>
                     <span className="fx-badge">∑</span>
-                    <strong>조건부 합계 만들기</strong>
+                    <strong>조건에 맞는 값 더하기</strong>
                   </div>
                   <button
-                    aria-label="조건부 합계 닫기"
+                    aria-label="조건에 맞는 값 더하기 닫기"
                     onClick={() => setConditionalSumDraft(null)}
                   >
                     ×
                   </button>
                 </header>
                 <section>
-                  <small>1단계 · 대상 데이터</small>
-                  <h2>어떤 데이터를 합산할까요?</h2>
+                  <small>1단계 · 행마다 찾을 데이터</small>
+                  <h2>각 행에서 어떤 값을 더할까요?</h2>
                   <div className="conditional-sum-grid">
                     <label>
-                      관계로 연결된 시트
+                      현재 행에서 찾을 데이터
                       <select
-                        aria-label="조건부 합계 대상 시트"
+                        aria-label="현재 행에서 찾을 데이터"
                         value={conditionalSumDraft.sourceSheetId}
                         onChange={(event) =>
                           selectConditionalSumSource(event.target.value)
@@ -5133,9 +5534,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       </select>
                     </label>
                     <label>
-                      더할 숫자 필드
+                      더할 값
                       <select
-                        aria-label="합산할 숫자 필드"
+                        aria-label="더할 값"
                         value={conditionalSumDraft.valueColumn}
                         onChange={(event) =>
                           setConditionalSumDraft((current) =>
@@ -5153,16 +5554,17 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     </label>
                   </div>
                   <p className="formula-help">
-                    현재 {activeSheet.name}의 각 행에서 관계를 따라 연결된 {" "}
-                    {sourceSheet.name} 행들을 대상으로 계산합니다.
+                    이 규칙은 {activeSheet.name}의 모든 행에 적용됩니다. 각
+                    행마다 연결된 {sourceSheet.name} 데이터를 찾고 {" "}
+                    {conditionalSumDraft.valueColumn} 값을 더합니다.
                   </p>
                 </section>
                 <section>
-                  <small>2단계 · 업무 조건</small>
-                  <h2>어떤 행만 포함할까요?</h2>
+                  <small>2단계 · 더할 데이터 조건</small>
+                  <h2>어떤 데이터만 더할까요?</h2>
                   <p className="formula-help">
-                    현재 시트와 연결된 모든 관계 경로에서 조건 필드를 고를 수
-                    있습니다. 각 조건을 모두 만족하는 집계 대상 행만 합산합니다.
+                    현재 행이나 연결된 다른 데이터의 필드를 조건으로 고를 수
+                    있습니다. 아래 조건을 모두 만족하는 데이터만 더합니다.
                   </p>
                   <div className="conditional-rule-list">
                     {conditionalSumDraft.conditions.map((condition, index) => {
@@ -5382,14 +5784,17 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </button>
                 </section>
                 <section>
-                  <small>3단계 · 구현 명세</small>
-                  <h2>엔지니어가 구현할 규칙을 확인해주세요</h2>
+                  <small>3단계 · 행별 계산 결과</small>
+                  <h2>규칙과 행별 결과를 확인하세요</h2>
                   <div className="business-rule-summary">
-                    <strong>{sourceSheet.name}의 {conditionalSumDraft.valueColumn} 합계</strong>
+                    <strong>
+                      각 {activeSheet.name} 행마다 {sourceSheet.name}의 {" "}
+                      {conditionalSumDraft.valueColumn} 더하기
+                    </strong>
                     <p>
-                      현재 {activeSheet.name} 행과 관계로 연결된 데이터 중 {" "}
+                      현재 행을 기준으로 연결된 데이터를 찾고, {" "}
                       {conditionalSumDraft.conditions.length}개 조건을 모두 만족하는
-                      행만 포함합니다.
+                      데이터의 값을 더합니다.
                     </p>
                     <ul>
                       {conditionalSumDraft.conditions.map((condition) => {
@@ -5419,9 +5824,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     </ul>
                   </div>
                   <label className="relation-target-sheet">
-                    계산 필드 이름
+                    새 계산 컬럼 이름
                     <input
-                      aria-label="조건부 합계 필드 이름"
+                      aria-label="새 계산 컬럼 이름"
                       value={conditionalSumDraft.name}
                       onChange={(event) =>
                         setConditionalSumDraft((current) =>
@@ -5430,6 +5835,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       }
                     />
                   </label>
+                  <strong className="calculation-preview-title">
+                    행별 미리보기
+                  </strong>
                   <div className="calculation-preview">
                     {preview.map((item) => (
                       <div key={item.rowId}>
@@ -5448,7 +5856,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     disabled={!conditionalSumDraft.name.trim()}
                     onClick={saveConditionalSum}
                   >
-                    조건부 합계 만들기
+                    계산 컬럼 만들기
                   </button>
                 </footer>
               </div>
@@ -5479,9 +5887,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 ] ?? `${index + 1}번 데이터`,
               value: calculateFieldValue(
                 sampleField,
-                formulaRelations,
+                sheetRelations,
                 sheets,
                 rowId,
+                [...calculatedFields, sampleField],
               ),
             }));
           return (
@@ -5579,7 +5988,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                           >
                             {formulaSheetPaths.flatMap(
                               ({ sheet, relationPath }) =>
-                                numericColumns(sheet).map((column) => (
+                                numericFieldNames(sheet).map((column) => (
                                   <option
                                     key={`${sheet.id}:${column}`}
                                     value={JSON.stringify([
@@ -5595,6 +6004,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                       sheets,
                                     )}{" "}
                                     · {column}
+                                    {calculatedFields.some(
+                                      (field) =>
+                                        field.resultSheetId === sheet.id &&
+                                        field.name === column,
+                                    )
+                                      ? " · 계산 결과"
+                                      : ""}
                                   </option>
                                 )),
                             )}
