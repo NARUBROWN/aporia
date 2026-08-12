@@ -31,6 +31,9 @@ type ColumnType = "text" | "number" | "date" | "boolean";
 type Sheet = {
   id: string;
   name: string;
+  color?: string;
+  comment?: string;
+  columnComments?: Record<string, string>;
   columns: string[];
   columnTypes?: (ColumnType | null)[];
   rowIds: string[];
@@ -553,6 +556,17 @@ const columnTypeOptions: {
     description: "두 가지 상태",
     icon: "✓",
   },
+];
+
+const sheetColorPalette = [
+  "#4F8B6D",
+  "#3B82A0",
+  "#5B6FB5",
+  "#8067B7",
+  "#B36B8C",
+  "#C06B52",
+  "#B8893B",
+  "#6E7C72",
 ];
 
 function columnTypeLabel(type: ColumnType) {
@@ -1914,7 +1928,10 @@ function SheetErdView({
               }}
             >
               <span className="sheet-erd-node-header">
-                <span className="table-dot" />
+                <span
+                  className="table-dot"
+                  style={{ background: sheet.color ?? undefined }}
+                />
                 <strong>{sheet.name}</strong>
                 <small>{sheet.rows.length}행</small>
               </span>
@@ -1966,11 +1983,20 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [activeSheetId, setActiveSheetId] = useState(isTemporary ? "" : "stg-source");
   const [editingSheetId, setEditingSheetId] = useState<string | null>(null);
   const [sheetNameDraft, setSheetNameDraft] = useState("");
+  const [sheetSettingsOpen, setSheetSettingsOpen] = useState(false);
+  const [sheetColorDraft, setSheetColorDraft] = useState("#4f8b6d");
+  const [sheetCommentDraft, setSheetCommentDraft] = useState("");
+  const [draggingSheetId, setDraggingSheetId] = useState<string | null>(null);
+  const [sheetDropTarget, setSheetDropTarget] = useState<{
+    id: string;
+    side: "before" | "after";
+  } | null>(null);
   const cancelSheetRenameRef = useRef(false);
   const [editingColumnIndex, setEditingColumnIndex] = useState<number | null>(
     null,
   );
   const [columnNameDraft, setColumnNameDraft] = useState("");
+  const [columnCommentDraft, setColumnCommentDraft] = useState("");
   const [fieldMenuOpen, setFieldMenuOpen] = useState(false);
   const [newColumnDraft, setNewColumnDraft] = useState<NewColumnDraft | null>(
     null,
@@ -2737,6 +2763,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const sheet: Sheet = {
       id: sheetId,
       name: `새 시트 ${sequence}`,
+      color: "#4f8b6d",
+      comment: "",
+      columnComments: {},
       columns: ["이름", "생성일"],
       columnTypes: ["text", "date"],
       rowIds: [`${sheetId}-internal-row-${crypto.randomUUID()}`],
@@ -2744,6 +2773,47 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     };
     setSheets((current) => [...current, sheet]);
     setActiveSheetId(sheet.id);
+  }
+
+  function openSheetSettings(sheet: Sheet = activeSheet) {
+    setActiveSheetId(sheet.id);
+    setSheetColorDraft(sheet.color ?? "#4f8b6d");
+    setSheetCommentDraft(sheet.comment ?? "");
+    setSheetSettingsOpen(true);
+  }
+
+  function saveSheetSettings() {
+    setSheets((current) =>
+      current.map((sheet) =>
+        sheet.id === activeSheet.id
+          ? {
+              ...sheet,
+              color: sheetColorDraft,
+              comment: sheetCommentDraft.trim(),
+            }
+          : sheet,
+      ),
+    );
+    setSheetSettingsOpen(false);
+  }
+
+  function moveSheetTab(
+    sourceSheetId: string,
+    targetSheetId: string,
+    side: "before" | "after",
+  ) {
+    if (sourceSheetId === targetSheetId) return;
+    setSheets((current) => {
+      const source = current.find((sheet) => sheet.id === sourceSheetId);
+      if (!source) return current;
+      const reordered = current.filter((sheet) => sheet.id !== sourceSheetId);
+      const targetIndex = reordered.findIndex(
+        (sheet) => sheet.id === targetSheetId,
+      );
+      if (targetIndex < 0) return current;
+      reordered.splice(targetIndex + (side === "after" ? 1 : 0), 0, source);
+      return reordered;
+    });
   }
 
   function startSheetRename(sheet: Sheet = activeSheet) {
@@ -2981,6 +3051,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   function startColumnEdit(columnIndex: number) {
     setEditingColumnIndex(columnIndex);
     setColumnNameDraft(activeSheet.columns[columnIndex]);
+    setColumnCommentDraft(
+      activeSheet.columnComments?.[activeSheet.columns[columnIndex]] ?? "",
+    );
   }
 
   function saveColumnName() {
@@ -2998,6 +3071,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               columns: sheet.columns.map((column, index) =>
                 index === editingColumnIndex ? name : column,
               ),
+              columnComments: Object.fromEntries([
+                ...Object.entries(sheet.columnComments ?? {}).filter(
+                  ([column]) => column !== previous,
+                ),
+                [name, columnCommentDraft.trim()],
+              ]),
             },
       ),
     );
@@ -3056,6 +3135,11 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               columns: nextColumns,
               columnTypes: sheet.columnTypes?.filter(
                 (_, index) => index !== columnIndex,
+              ),
+              columnComments: Object.fromEntries(
+                Object.entries(sheet.columnComments ?? {}).filter(
+                  ([name]) => name !== column,
+                ),
               ),
               rows: sheet.rows.map((row) =>
                 row.filter((_, index) => index !== columnIndex),
@@ -4414,8 +4498,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         )}
       </div>
       <section
-        className={`sheet-dock ${sheetDockMode}`}
+        className={`sheet-dock ${sheetDockMode}${!hydrated ? " loading" : ""}`}
         aria-label="데이터 시트"
+        aria-busy={!hydrated}
       >
         <div
           role="separator"
@@ -4440,6 +4525,27 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         >
           <span />
         </div>
+        {!hydrated && (
+          <div className="sheet-loading-skeleton" role="status">
+            <span className="sr-only">PostgreSQL에서 데이터를 불러오는 중</span>
+            <div className="sheet-skeleton-tabs" aria-hidden="true">
+              <span className="sheet-skeleton-title" />
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="sheet-skeleton-grid" aria-hidden="true">
+              {Array.from({ length: 24 }, (_, index) => (
+                <span key={index} />
+              ))}
+            </div>
+            <div className="sheet-skeleton-footer" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        )}
         <div className="sheet-tabs">
           <div className="sheet-title">
             <Icons.database />
@@ -4524,11 +4630,54 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             return (
               <div
                 key={sheet.id}
-                className={`sheet-tab ${activeSheet.id === sheet.id ? "active" : ""}`}
+                className={`sheet-tab ${activeSheet.id === sheet.id ? "active" : ""}${draggingSheetId === sheet.id ? " dragging" : ""}${sheetDropTarget?.id === sheet.id ? ` drop-${sheetDropTarget.side}` : ""}`}
+                style={{ borderTop: `3px solid ${sheet.color ?? "transparent"}` }}
+                draggable={editingSheetId !== sheet.id}
+                onDragStart={(event) => {
+                  setDraggingSheetId(sheet.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", sheet.id);
+                }}
+                onDragOver={(event) => {
+                  if (!draggingSheetId || draggingSheetId === sheet.id) return;
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setSheetDropTarget({
+                    id: sheet.id,
+                    side:
+                      event.clientX < rect.left + rect.width / 2
+                        ? "before"
+                        : "after",
+                  });
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const sourceId =
+                    draggingSheetId || event.dataTransfer.getData("text/plain");
+                  if (sourceId && sheetDropTarget)
+                    moveSheetTab(sourceId, sheet.id, sheetDropTarget.side);
+                  setDraggingSheetId(null);
+                  setSheetDropTarget(null);
+                }}
+                onDragEnd={() => {
+                  setDraggingSheetId(null);
+                  setSheetDropTarget(null);
+                }}
               >
+              <button
+                type="button"
+                className="sheet-color-button"
+                style={{ background: sheet.color ?? "#4f8b6d" }}
+                aria-label={`${sheet.name} 시트 색상 변경`}
+                title="시트 색상 변경"
+                draggable={false}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openSheetSettings(sheet);
+                }}
+              />
               {editingSheetId === sheet.id ? (
                 <div className="sheet-tab-select sheet-tab-name-editor">
-                  <span className="table-dot" />
                   <input
                     aria-label={`${sheet.name} 시트 이름`}
                     value={sheetNameDraft}
@@ -4558,13 +4707,15 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               ) : (
                 <button
                   className="sheet-tab-select"
-                  title="더블클릭하여 시트 이름 변경"
+                  title={
+                    sheet.comment ||
+                    "드래그하여 순서 변경 · 더블클릭하여 시트 이름 변경"
+                  }
                   onClick={(event) => {
                     setActiveSheetId(sheet.id);
                     if (event.detail === 2) startSheetRename(sheet);
                   }}
                 >
-                  <span className="table-dot" />
                   {sheet.name}
                   <small>{sheet.rows.length}</small>
                 </button>
@@ -4684,6 +4835,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       <th
                         key={`${column}-${index}`}
                         className="editable-column"
+                        title={activeSheet.columnComments?.[column] || undefined}
                       >
                         <span className="field-number">#{index + 1}</span>
                         <span className="field-type">
@@ -4735,6 +4887,17 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                   if (event.key === "Escape")
                                     setEditingColumnIndex(null);
                                 }}
+                              />
+                            </label>
+                            <label>
+                              컬럼 주석
+                              <textarea
+                                aria-label="컬럼 주석"
+                                value={columnCommentDraft}
+                                placeholder="이 컬럼의 업무 의미를 입력하세요"
+                                onChange={(event) =>
+                                  setColumnCommentDraft(event.target.value)
+                                }
                               />
                             </label>
                             <div>
@@ -4985,16 +5148,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             </div>
             <footer className="sheet-footer">
               <span>
-                <b>{activeSheet.name}</b> 테이블
+                <b>{activeSheet.name}</b> 시트
               </span>
-              {editingSheetId !== activeSheet.id && (
-                <button
-                  className="sheet-footer-action"
-                  onClick={() => startSheetRename()}
-                >
-                  이름 변경
-                </button>
-              )}
+              <button
+                className="sheet-footer-action"
+                onClick={() => openSheetSettings()}
+              >
+                시트 설정
+              </button>
               <button
                 className="sheet-footer-action developer-spec-trigger"
                 onClick={() => setDeveloperSpecOpen(true)}
@@ -5015,6 +5176,80 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           )
         )}
       </section>
+      {sheetSettingsOpen && (
+        <div
+          className="relation-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget)
+              setSheetSettingsOpen(false);
+          }}
+        >
+          <div
+            className="relation-modal sheet-settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${activeSheet.name} 시트 설정`}
+          >
+            <header>
+              <strong>시트 설정</strong>
+              <button
+                aria-label="시트 설정 닫기"
+                onClick={() => setSheetSettingsOpen(false)}
+              >
+                ×
+              </button>
+            </header>
+            <section>
+              <label className="sheet-color-setting">
+                시트 색상
+                <span className="sheet-color-palette" aria-label="기본 색상 팔레트">
+                  {sheetColorPalette.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      className={
+                        sheetColorDraft.toLowerCase() === color.toLowerCase()
+                          ? "selected"
+                          : ""
+                      }
+                      style={{ background: color }}
+                      aria-label={`${color} 색상 선택`}
+                      aria-pressed={
+                        sheetColorDraft.toLowerCase() === color.toLowerCase()
+                      }
+                      onClick={() => setSheetColorDraft(color)}
+                    />
+                  ))}
+                </span>
+                <span>
+                  <input
+                    type="color"
+                    aria-label="시트 색상"
+                    value={sheetColorDraft}
+                    onChange={(event) => setSheetColorDraft(event.target.value)}
+                  />
+                  <b>사용자 지정 · {sheetColorDraft.toUpperCase()}</b>
+                </span>
+              </label>
+              <label>
+                시트 주석
+                <textarea
+                  aria-label="시트 주석"
+                  value={sheetCommentDraft}
+                  placeholder="이 시트의 목적과 업무 의미를 입력하세요"
+                  onChange={(event) => setSheetCommentDraft(event.target.value)}
+                />
+              </label>
+            </section>
+            <footer>
+              <button onClick={() => setSheetSettingsOpen(false)}>취소</button>
+              <button className="confirm" onClick={saveSheetSettings}>
+                저장
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
       {developerSpecOpen &&
         (() => {
           const fieldsByName = new Map(
