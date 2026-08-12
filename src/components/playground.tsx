@@ -1988,6 +1988,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     useState<CalculationDraft | null>(null);
   const [conditionalSumDraft, setConditionalSumDraft] =
     useState<ConditionalSumDraft | null>(null);
+  const [editingCalculatedFieldId, setEditingCalculatedFieldId] = useState<
+    string | null
+  >(null);
   const [inspectingCalculatedField, setInspectingCalculatedField] =
     useState<CalculatedField | null>(null);
   const [developerSpecOpen, setDeveloperSpecOpen] = useState(false);
@@ -3193,6 +3196,79 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       ],
       name: `${firstField.sheet.name}·${secondField.sheet.name} 계산`,
     });
+    setEditingCalculatedFieldId(null);
+  }
+
+  function editCalculatedField(field: CalculatedField) {
+    setInspectingCalculatedField(null);
+    setEditingCalculatedFieldId(field.id);
+    if (isConditionalSumField(field)) {
+      setConditionalSumDraft({
+        name: field.name,
+        resultSheetId: field.resultSheetId,
+        sourceSheetId: field.sourceSheetId,
+        relationPath: field.relationPath,
+        valueColumn: field.valueColumn,
+        conditions: field.conditions,
+      });
+      return;
+    }
+    setCalculationDraft({
+      name: field.name,
+      relationIds: field.relationIds,
+      formula: field.formula,
+    });
+  }
+
+  function closeCalculatedFieldEditor() {
+    setConditionalSumDraft(null);
+    setCalculationDraft(null);
+    setEditingCalculatedFieldId(null);
+  }
+
+  function replaceCalculatedField(
+    current: CalculatedField[],
+    nextField: CalculatedField,
+  ) {
+    const previous = current.find((field) => field.id === nextField.id);
+    return current.map((field) => {
+      if (field.id === nextField.id) return nextField;
+      if (!previous || previous.name === nextField.name || isConditionalSumField(field))
+        return field;
+      return {
+        ...field,
+        formula: field.formula.map((token) =>
+          token.kind === "field" &&
+          token.sheetId === previous.resultSheetId &&
+          token.column === previous.name
+            ? { ...token, column: nextField.name }
+            : token,
+        ),
+      };
+    });
+  }
+
+  function updateBindingsForCalculatedFieldRename(nextName: string) {
+    const previous = calculatedFields.find(
+      (field) => field.id === editingCalculatedFieldId,
+    );
+    if (!previous || previous.name === nextName) return;
+    setDisplayBindings((current) =>
+      Object.fromEntries(
+        Object.entries(current).map(([itemId, binding]) => [
+          itemId,
+          binding.sheetId === previous.resultSheetId
+            ? {
+                ...binding,
+                field: binding.field === previous.name ? nextName : binding.field,
+                fields: binding.fields.map((name) =>
+                  name === previous.name ? nextName : name,
+                ),
+              }
+            : binding,
+        ]),
+      ),
+    );
   }
 
   function selectConditionalSumSource(sheetId: string) {
@@ -3247,19 +3323,25 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const name = conditionalSumDraft.name.trim();
     if (
       activeSheet.columns.includes(name) ||
-      activeCalculatedFields.some((field) => field.name === name)
+      activeCalculatedFields.some(
+        (field) => field.name === name && field.id !== editingCalculatedFieldId,
+      )
     )
       return;
-    setCalculatedFields((current) => [
-      ...current,
-      {
+    setCalculatedFields((current) => {
+      const nextField: ConditionalSumField = {
         ...conditionalSumDraft,
-        id: crypto.randomUUID(),
+        id: editingCalculatedFieldId ?? crypto.randomUUID(),
         kind: "conditionalSum",
         name,
-      },
-    ]);
+      };
+      return editingCalculatedFieldId
+        ? replaceCalculatedField(current, nextField)
+        : [...current, nextField];
+    });
+    updateBindingsForCalculatedFieldRename(name);
     setConditionalSumDraft(null);
+    setEditingCalculatedFieldId(null);
   }
 
   function appendFormulaOperator(operator: CalculationOperator) {
@@ -3340,20 +3422,26 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const name = calculationDraft.name.trim();
     if (
       activeSheet.columns.includes(name) ||
-      activeCalculatedFields.some((field) => field.name === name)
+      activeCalculatedFields.some(
+        (field) => field.name === name && field.id !== editingCalculatedFieldId,
+      )
     )
       return;
-    setCalculatedFields((current) => [
-      ...current,
-      {
-        id: crypto.randomUUID(),
+    setCalculatedFields((current) => {
+      const nextField: ArithmeticCalculatedField = {
+        id: editingCalculatedFieldId ?? crypto.randomUUID(),
         name,
         resultSheetId: activeSheet.id,
         relationIds: calculationDraft.relationIds,
         formula: calculationDraft.formula,
-      },
-    ]);
+      };
+      return editingCalculatedFieldId
+        ? replaceCalculatedField(current, nextField)
+        : [...current, nextField];
+    });
+    updateBindingsForCalculatedFieldRename(name);
     setCalculationDraft(null);
+    setEditingCalculatedFieldId(null);
   }
 
   function deleteCalculatedField(field: CalculatedField) {
@@ -4736,6 +4824,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                   },
                                 ],
                               });
+                              setEditingCalculatedFieldId(null);
                               setFieldMenuOpen(false);
                             }}
                           >
@@ -5340,6 +5429,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </ol>
                 </section>
                 <footer>
+                  <button onClick={() => editCalculatedField(field)}>
+                    조건 수정
+                  </button>
                   <button
                     className="confirm"
                     onClick={() => setInspectingCalculatedField(null)}
@@ -5448,6 +5540,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </div>
                 </section>
                 <footer>
+                  <button onClick={() => editCalculatedField(field)}>
+                    계산식 수정
+                  </button>
                   <button
                     className="confirm"
                     onClick={() => setInspectingCalculatedField(null)}
@@ -5487,7 +5582,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               className="relation-modal-backdrop"
               onMouseDown={(event) => {
                 if (event.target === event.currentTarget)
-                  setConditionalSumDraft(null);
+                  closeCalculatedFieldEditor();
               }}
             >
               <div
@@ -5499,11 +5594,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 <header>
                   <div>
                     <span className="fx-badge">∑</span>
-                    <strong>조건에 맞는 값 더하기</strong>
+                    <strong>
+                      조건에 맞는 값 더하기
+                      {editingCalculatedFieldId ? " 수정" : ""}
+                    </strong>
                   </div>
                   <button
                     aria-label="조건에 맞는 값 더하기 닫기"
-                    onClick={() => setConditionalSumDraft(null)}
+                    onClick={closeCalculatedFieldEditor}
                   >
                     ×
                   </button>
@@ -5848,7 +5946,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </div>
                 </section>
                 <footer>
-                  <button onClick={() => setConditionalSumDraft(null)}>
+                  <button onClick={closeCalculatedFieldEditor}>
                     취소
                   </button>
                   <button
@@ -5856,7 +5954,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     disabled={!conditionalSumDraft.name.trim()}
                     onClick={saveConditionalSum}
                   >
-                    계산 컬럼 만들기
+                    {editingCalculatedFieldId
+                      ? "계산 컬럼 수정 저장"
+                      : "계산 컬럼 만들기"}
                   </button>
                 </footer>
               </div>
@@ -5898,7 +5998,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               className="relation-modal-backdrop"
               onMouseDown={(event) => {
                 if (event.target === event.currentTarget)
-                  setCalculationDraft(null);
+                  closeCalculatedFieldEditor();
               }}
             >
               <div
@@ -5910,11 +6010,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 <header>
                   <div>
                     <span className="fx-badge">fx</span>
-                    <strong>계산 필드 만들기</strong>
+                    <strong>
+                      계산 필드 {editingCalculatedFieldId ? "수정" : "만들기"}
+                    </strong>
                   </div>
                   <button
                     aria-label="계산 필드 닫기"
-                    onClick={() => setCalculationDraft(null)}
+                    onClick={closeCalculatedFieldEditor}
                   >
                     ×
                   </button>
@@ -6113,7 +6215,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </div>
                 </section>
                 <footer>
-                  <button onClick={() => setCalculationDraft(null)}>
+                  <button onClick={closeCalculatedFieldEditor}>
                     취소
                   </button>
                   <button
@@ -6124,7 +6226,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     }
                     onClick={saveCalculatedField}
                   >
-                    계산 필드 만들기
+                    {editingCalculatedFieldId
+                      ? "계산 필드 수정 저장"
+                      : "계산 필드 만들기"}
                   </button>
                 </footer>
               </div>
