@@ -1,8 +1,9 @@
 "use client";
 
 import { validateSheetValue } from "@/lib/sheet-value-validation";
+import { upsertSheetRelation } from "@/lib/sheet-relations";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icons } from "@/components/icons";
 
@@ -42,6 +43,11 @@ type Sheet = {
   normalized?: boolean;
   rowCount?: number;
   nextCursor?: string | null;
+};
+type SheetFolder = {
+  id: string;
+  name: string;
+  sheetIds: string[];
 };
 
 type NormalizedSheetPayload = {
@@ -88,6 +94,31 @@ type DisplayBinding = {
 };
 type DisplayBindings = Record<string, DisplayBinding>;
 type RelationType = "1:1" | "1:N" | "N:1" | "N:N";
+
+function RelationCardIcon({ type }: { type: RelationType }) {
+  const left = type === "1:1" || type === "1:N" ? [32] : [12, 32, 52];
+  const right = type === "1:1" || type === "N:1" ? [32] : [12, 32, 52];
+  return (
+    <svg
+      className="relation-card-icon"
+      viewBox="0 0 76 64"
+      role="img"
+      aria-label={`${left.length}개와 ${right.length}개 연결 그림`}
+    >
+      <g className="relation-card-lines">
+        {left.flatMap((leftY) =>
+          right.map((rightY) => (
+            <line key={`${leftY}-${rightY}`} x1="24" y1={leftY} x2="52" y2={rightY} />
+          )),
+        )}
+      </g>
+      <g className="relation-card-nodes">
+        {left.map((y) => <rect key={`left-${y}`} x="10" y={y - 7} width="15" height="14" rx="4" />)}
+        {right.map((y) => <rect key={`right-${y}`} x="51" y={y - 7} width="15" height="14" rx="4" />)}
+      </g>
+    </svg>
+  );
+}
 type SheetViewMode = "grid" | "erd";
 type JoinCandidate = {
   id: string;
@@ -216,6 +247,7 @@ type ProjectSnapshot = {
   activePageId: string;
   canvasView: CanvasView;
   sheets: Sheet[];
+  sheetFolders: SheetFolder[];
   dataBinding: DataBindingConfig;
   displayBindings: DisplayBindings;
   sheetRelations: SheetRelation[];
@@ -241,6 +273,7 @@ function isProjectSnapshot(value: unknown): value is ProjectSnapshot {
     typeof snapshot.activePageId === "string" &&
     !!snapshot.canvasView &&
     Array.isArray(snapshot.sheets) &&
+    (snapshot.sheetFolders === undefined || Array.isArray(snapshot.sheetFolders)) &&
     !!snapshot.dataBinding &&
     !!snapshot.displayBindings &&
     Array.isArray(snapshot.sheetRelations) &&
@@ -2095,6 +2128,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     zoom: 0.9,
   });
   const [sheets, setSheets] = useState<Sheet[]>(isTemporary ? [] : initialSheets);
+  const [sheetFolders, setSheetFolders] = useState<SheetFolder[]>([]);
+  const [sheetFolderEditor, setSheetFolderEditor] = useState<{
+    folderId: string | null;
+    name: string;
+  } | null>(null);
+  const [expandedSheetFolderIds, setExpandedSheetFolderIds] = useState<string[]>([]);
+  const [sheetFolderDropTargetId, setSheetFolderDropTargetId] = useState<string | null>(null);
   const normalizedRowsLoadingRef = useRef(new Set<string>());
   const [loadingNormalizedSheetIds, setLoadingNormalizedSheetIds] = useState<
     string[]
@@ -2335,6 +2375,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setActivePageId(snapshot.activePageId);
     setCanvasView(snapshot.canvasView);
     setSheets(snapshot.sheets);
+    setSheetFolders(snapshot.sheetFolders ?? []);
     setDataBinding(snapshot.dataBinding);
     setDisplayBindings(snapshot.displayBindings);
     setSheetRelations(snapshot.sheetRelations);
@@ -2366,6 +2407,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       activePageId,
       canvasView,
       sheets: sheets.filter((sheet) => !sheet.normalized),
+      sheetFolders,
       dataBinding,
       displayBindings,
       sheetRelations,
@@ -2578,6 +2620,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               activePageId?: string;
               canvasView?: CanvasView;
               sheets?: Sheet[];
+              sheetFolders?: SheetFolder[];
               dataBinding?: DataBindingConfig;
               displayBindings?: DisplayBindings;
               sheetRelations?: SheetRelation[];
@@ -2603,6 +2646,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           Array.isArray(document?.sheets)
         )
           setSheets(document.sheets);
+        if (hasCurrentDataModel && Array.isArray(document?.sheetFolders)) {
+          setSheetFolders(document.sheetFolders);
+          setExpandedSheetFolderIds(document.sheetFolders.map((folder) => folder.id));
+        }
         if (hasCurrentDataModel && document?.dataBinding)
           setDataBinding(document.dataBinding);
         if (hasCurrentDataModel && document?.displayBindings)
@@ -2759,6 +2806,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       activePageId,
       canvasView,
       sheets,
+      sheetFolders,
       dataBinding,
       displayBindings,
       sheetRelations,
@@ -2785,6 +2833,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     pages,
     sheetRelations,
     sheets,
+    sheetFolders,
     commitLatestProjectSnapshot,
     queueProjectHistoryCommit,
   ]);
@@ -2831,6 +2880,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             activePageId,
             canvasView,
             sheets: sheets.filter((sheet) => !sheet.normalized),
+            sheetFolders,
             dataBinding,
             displayBindings,
             sheetRelations,
@@ -2855,6 +2905,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     pages,
     projectId,
     sheetRelations,
+    sheetFolders,
     sheets,
   ]);
 
@@ -3017,6 +3068,62 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setActiveSheetId(sheet.id);
   }
 
+  function addSheetFolder() {
+    setSheetFolderEditor({
+      folderId: null,
+      name: `새 폴더 ${sheetFolders.length + 1}`,
+    });
+  }
+
+  function moveSheetToFolder(sheetId: string, folderId: string | null) {
+    setSheetFolders((current) =>
+      current.map((folder) => ({
+        ...folder,
+        sheetIds:
+          folder.id === folderId
+            ? [...folder.sheetIds.filter((id) => id !== sheetId), sheetId]
+            : folder.sheetIds.filter((id) => id !== sheetId),
+      })),
+    );
+  }
+
+  function renameSheetFolder(folder: SheetFolder) {
+    setSheetFolderEditor({ folderId: folder.id, name: folder.name });
+  }
+
+  function saveSheetFolder() {
+    if (!sheetFolderEditor) return;
+    const name = sheetFolderEditor.name.trim();
+    if (!name) return;
+    if (sheetFolderEditor.folderId) {
+      setSheetFolders((current) =>
+        current.map((item) =>
+          item.id === sheetFolderEditor.folderId ? { ...item, name } : item,
+        ),
+      );
+    } else {
+      const folder: SheetFolder = {
+        id: crypto.randomUUID(),
+        name,
+        sheetIds: [],
+      };
+      setSheetFolders((current) => [...current, folder]);
+      setExpandedSheetFolderIds((current) => [...current, folder.id]);
+    }
+    setSheetFolderEditor(null);
+  }
+
+  function deleteSheetFolder(folder: SheetFolder) {
+    if (!window.confirm(`'${folder.name}' 폴더를 삭제할까요? 내부 시트는 유지됩니다.`))
+      return;
+    setSheetFolders((current) =>
+      current.filter((item) => item.id !== folder.id),
+    );
+    setExpandedSheetFolderIds((current) =>
+      current.filter((id) => id !== folder.id),
+    );
+  }
+
   function openSheetSettings(sheet: Sheet = activeSheet) {
     setActiveSheetId(sheet.id);
     setSheetColorDraft(sheet.color ?? "#4f8b6d");
@@ -3106,6 +3213,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         ? remaining[0]
         : sheets.find((sheet) => sheet.id === activeSheet.id);
     setSheets(remaining);
+    setSheetFolders((current) =>
+      current.map((folder) => ({
+        ...folder,
+        sheetIds: folder.sheetIds.filter((id) => id !== sheetToDelete.id),
+      })),
+    );
     setActiveSheetId(nextSheet?.id ?? "");
     setEditingSheetId(null);
     setDisplayBindings((current) =>
@@ -3510,16 +3623,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       ...relationWithoutLinks,
       links: buildRelationLinks(relationWithoutLinks, sheets),
     };
-    setSheetRelations((current) => [
-      ...current.filter(
-        (item) =>
-          !(
-            item.sourceSheetId === relation.sourceSheetId &&
-            item.sourceColumn === relation.sourceColumn
-          ),
-      ),
-      relation,
-    ]);
+    setSheetRelations((current) => upsertSheetRelation(current, relation));
     setRelationDraft(null);
   }
 
@@ -4895,7 +4999,22 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           </div>
         )}
         <div className="sheet-tabs">
-          <div className="sheet-title">
+          <div
+            className="sheet-title"
+            onDragOver={(event) => {
+              if (!draggingSheetId) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              const sheetId =
+                draggingSheetId || event.dataTransfer.getData("text/plain");
+              if (sheetId) moveSheetToFolder(sheetId, null);
+              setDraggingSheetId(null);
+              setSheetFolderDropTargetId(null);
+            }}
+          >
             <Icons.database />
             <strong>데이터</strong>
             <div className="sheet-view-toggle" aria-label="데이터 보기 방식">
@@ -4954,9 +5073,51 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               >
                 <Icons.search />
               </button>
+              <button
+                type="button"
+                aria-label="시트 폴더 만들기"
+                title="폴더 만들기"
+                onClick={addSheetFolder}
+              >
+                <Icons.folder />
+                <span className="sheet-folder-plus" aria-hidden="true">+</span>
+              </button>
             </div>
           </div>
+          {sheetFolders
+            .filter((folder) => folder.sheetIds.length === 0)
+            .map((folder) => (
+              <div
+                key={folder.id}
+                className={`sheet-folder-tab empty${sheetFolderDropTargetId === folder.id ? " drop-target" : ""}`}
+                onDragOver={(event) => {
+                  if (!draggingSheetId) return;
+                  event.preventDefault();
+                  setSheetFolderDropTargetId(folder.id);
+                }}
+                onDragLeave={() => setSheetFolderDropTargetId(null)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const sheetId = draggingSheetId || event.dataTransfer.getData("text/plain");
+                  if (sheetId) moveSheetToFolder(sheetId, folder.id);
+                  setExpandedSheetFolderIds((current) =>
+                    current.includes(folder.id) ? current : [...current, folder.id],
+                  );
+                  setDraggingSheetId(null);
+                  setSheetFolderDropTargetId(null);
+                }}
+              >
+                <button onClick={() => renameSheetFolder(folder)} title="더블클릭하여 이름 변경">
+                  <Icons.folder /> {folder.name}<small>0</small>
+                </button>
+                <button aria-label={`${folder.name} 폴더 삭제`} onClick={() => deleteSheetFolder(folder)}>×</button>
+              </div>
+            ))}
           {sheets.map((sheet) => {
+            const folder = sheetFolders.find((item) => item.sheetIds.includes(sheet.id));
+            const firstFolderSheetId = folder?.sheetIds.find((id) => sheets.some((item) => item.id === id));
+            const folderExpanded = folder ? expandedSheetFolderIds.includes(folder.id) : true;
             const tabRelations = sheetRelations.filter(
               (relation) =>
                 relation.sourceSheetId === sheet.id ||
@@ -4976,9 +5137,47 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               })
               .join("\n");
             return (
+              <Fragment key={sheet.id}>
+              {folder && firstFolderSheetId === sheet.id && (
+                <div
+                  className={`sheet-folder-tab${sheetFolderDropTargetId === folder.id ? " drop-target" : ""}`}
+                  onDragOver={(event) => {
+                    if (!draggingSheetId) return;
+                    event.preventDefault();
+                    setSheetFolderDropTargetId(folder.id);
+                  }}
+                  onDragLeave={() => setSheetFolderDropTargetId(null)}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const sheetId = draggingSheetId || event.dataTransfer.getData("text/plain");
+                    if (sheetId) moveSheetToFolder(sheetId, folder.id);
+                    setExpandedSheetFolderIds((current) =>
+                      current.includes(folder.id) ? current : [...current, folder.id],
+                    );
+                    setDraggingSheetId(null);
+                    setSheetFolderDropTargetId(null);
+                  }}
+                >
+                  <button
+                    aria-expanded={folderExpanded}
+                    onClick={() => setExpandedSheetFolderIds((current) =>
+                      current.includes(folder.id)
+                        ? current.filter((id) => id !== folder.id)
+                        : [...current, folder.id]
+                    )}
+                    onDoubleClick={() => renameSheetFolder(folder)}
+                    title="클릭하여 접기/펼치기 · 더블클릭하여 이름 변경"
+                  >
+                    <Icons.folder /> {folder.name}<small>{folder.sheetIds.length}</small>
+                    <span className="sheet-folder-state" aria-hidden="true" />
+                  </button>
+                  <button aria-label={`${folder.name} 폴더 삭제`} onClick={() => deleteSheetFolder(folder)}>×</button>
+                </div>
+              )}
+              {folderExpanded && (
               <div
-                key={sheet.id}
-                className={`sheet-tab ${activeSheet.id === sheet.id ? "active" : ""}${draggingSheetId === sheet.id ? " dragging" : ""}${sheetDropTarget?.id === sheet.id ? ` drop-${sheetDropTarget.side}` : ""}`}
+                className={`sheet-tab${folder ? " in-folder" : ""} ${activeSheet.id === sheet.id ? "active" : ""}${draggingSheetId === sheet.id ? " dragging" : ""}${sheetDropTarget?.id === sheet.id ? ` drop-${sheetDropTarget.side}` : ""}`}
                 style={{ borderTop: `3px solid ${sheet.color ?? "transparent"}` }}
                 draggable={editingSheetId !== sheet.id}
                 onDragStart={(event) => {
@@ -5000,6 +5199,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 }}
                 onDrop={(event) => {
                   event.preventDefault();
+                  event.stopPropagation();
                   const sourceId =
                     draggingSheetId || event.dataTransfer.getData("text/plain");
                   if (sourceId && sheetDropTarget)
@@ -5050,7 +5250,6 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       }
                     }}
                   />
-                  <small>{sheetRowCount(sheet)}</small>
                 </div>
               ) : (
                 <button
@@ -5065,7 +5264,6 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   }}
                 >
                   {sheet.name}
-                  <small>{sheetRowCount(sheet)}</small>
                 </button>
               )}
               {sheets.length > 1 && (
@@ -5093,6 +5291,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 ×
               </button>
               </div>
+              )}
+              </Fragment>
             );
           })}
           <button
@@ -5216,24 +5416,37 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                         </span>
                         {column}
                         {(() => {
-                          const relation = sheetRelations.find(
+                          const columnRelations = sheetRelations.filter(
                             (item) =>
                               (item.sourceSheetId === activeSheet.id &&
                                 item.sourceColumn === column) ||
                               (item.targetSheetId === activeSheet.id &&
                                 item.targetColumn === column),
                           );
-                          const otherSheetId =
-                            relation?.sourceSheetId === activeSheet.id
-                              ? relation.targetSheetId
-                              : relation?.sourceSheetId;
-                          const otherSheet = sheets.find(
-                            (sheet) => sheet.id === otherSheetId,
-                          );
+                          const relatedSheetNames = [
+                            ...new Set(
+                              columnRelations.flatMap((relation) => {
+                                const otherSheetId =
+                                  relation.sourceSheetId === activeSheet.id
+                                    ? relation.targetSheetId
+                                    : relation.sourceSheetId;
+                                const otherSheet = sheets.find(
+                                  (sheet) => sheet.id === otherSheetId,
+                                );
+                                return otherSheet ? [otherSheet.name] : [];
+                              }),
+                            ),
+                          ];
                           return (
-                            relation && (
-                              <span className="relation-chip">
-                                ↔ {otherSheet?.name}
+                            columnRelations.length > 0 && (
+                              <span
+                                className="relation-chip"
+                                title={relatedSheetNames.join("\n")}
+                                aria-label={`${column} 필드에 ${columnRelations.length}개 관계: ${relatedSheetNames.join(", ")}`}
+                              >
+                                ↔ {relatedSheetNames[0]}
+                                {columnRelations.length > 1 &&
+                                  ` +${columnRelations.length - 1}`}
                               </span>
                             )
                           );
@@ -5627,12 +5840,6 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               <span>
                 <b>{activeSheet.name}</b> 시트
               </span>
-              <button
-                className="sheet-footer-action"
-                onClick={() => openSheetSettings()}
-              >
-                시트 설정
-              </button>
               <button
                 className="sheet-footer-action developer-spec-trigger"
                 onClick={() => setDeveloperSpecOpen(true)}
@@ -7220,28 +7427,39 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 </section>
                 <section>
                   <small>2단계</small>
-                  <h2>두 시트는 어떤 관계인가요?</h2>
+                  <h2>한 항목에 몇 개가 연결되나요?</h2>
+                  <p className="relation-choice-help">
+                    숫자나 DB 용어는 몰라도 괜찮아요. 실제 업무에서 가장 가까운 그림을 골라주세요.
+                  </p>
                   <div className="relation-choice-grid">
                     {(
                       [
-                        ["1:1", "하나와 하나", "각 데이터가 하나씩 연결돼요"],
+                        [
+                          "1:1",
+                          "한 개 ↔ 한 개",
+                          `${source.name} 한 항목마다 ${target.name}도 한 항목만 연결돼요.`,
+                          "예: 직원 한 명과 사원증 한 장",
+                        ],
                         [
                           "1:N",
-                          "하나와 여러 개",
-                          `${source.name} 하나에 ${target.name} 여러 개`,
+                          "한 개 → 여러 개",
+                          `${source.name} 한 항목에 ${target.name} 여러 항목이 모여요.`,
+                          "예: 고객 한 명의 여러 주문",
                         ],
                         [
                           "N:1",
-                          "여러 개와 하나",
-                          `${source.name} 여러 개가 ${target.name} 하나에 연결`,
+                          "여러 개 → 한 개",
+                          `${source.name} 여러 항목이 ${target.name} 한 항목을 함께 가리켜요.`,
+                          "예: 여러 직원이 한 부서에 소속",
                         ],
                         [
                           "N:N",
-                          "여러 개와 여러 개",
-                          "양쪽 모두 여러 데이터와 연결돼요",
+                          "여러 개 ↔ 여러 개",
+                          `${source.name}와 ${target.name}가 양쪽에서 여러 항목씩 연결돼요.`,
+                          "예: 여러 학생이 여러 수업을 수강",
                         ],
-                      ] as [RelationType, string, string][]
-                    ).map(([type, title, description]) => (
+                      ] as [RelationType, string, string, string][]
+                    ).map(([type, title, description, example]) => (
                       <button
                         key={type}
                         className={
@@ -7254,8 +7472,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                           )
                         }
                       >
-                        <strong>{title}</strong>
-                        <small>{description}</small>
+                        <RelationCardIcon type={type} />
+                        <span className="relation-card-copy">
+                          <strong>{title}</strong>
+                          <small>{description}</small>
+                          <em>{example}</em>
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -7334,6 +7556,52 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             </div>
           );
         })()}
+      {sheetFolderEditor && (
+        <div
+          className="relation-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSheetFolderEditor(null);
+          }}
+        >
+          <div
+            className="relation-modal sheet-folder-editor-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={sheetFolderEditor.folderId ? "시트 폴더 이름 변경" : "시트 폴더 만들기"}
+          >
+            <header>
+              <strong>{sheetFolderEditor.folderId ? "폴더 이름 변경" : "새 시트 폴더"}</strong>
+              <button aria-label="폴더 편집 닫기" onClick={() => setSheetFolderEditor(null)}>×</button>
+            </header>
+            <section>
+              <label>
+                폴더 이름
+                <input
+                  autoFocus
+                  aria-label="폴더 이름"
+                  value={sheetFolderEditor.name}
+                  onChange={(event) =>
+                    setSheetFolderEditor((current) =>
+                      current && { ...current, name: event.target.value },
+                    )
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") saveSheetFolder();
+                    if (event.key === "Escape") setSheetFolderEditor(null);
+                  }}
+                />
+              </label>
+              <small>생성한 폴더로 시트 탭을 드래그해서 정리할 수 있습니다.</small>
+            </section>
+            <footer>
+              <button onClick={() => setSheetFolderEditor(null)}>취소</button>
+              <button className="confirm" disabled={!sheetFolderEditor.name.trim()} onClick={saveSheetFolder}>
+                {sheetFolderEditor.folderId ? "변경" : "만들기"}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

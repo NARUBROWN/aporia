@@ -3332,6 +3332,23 @@ svg {
   width: 11px;
   color: currentColor;
 }
+.sheet-window-controls button {
+  position: relative;
+}
+.sheet-folder-plus {
+  position: absolute;
+  right: 1px;
+  bottom: 0;
+  display: grid;
+  place-items: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #39775a;
+  color: #fff;
+  font-size: 7px;
+  line-height: 1;
+}
 .sheet-window-controls button:hover,
 .sheet-window-controls button:focus-visible {
   color: #245f45;
@@ -3433,6 +3450,74 @@ svg {
   font-size: 8px;
   color: #6f7b73;
   position: relative;
+}
+.sheet-folder-tab {
+  min-width: 112px;
+  display: flex;
+  align-items: stretch;
+  border-right: 1px solid #d9e2dc;
+  background: #eaf2ed;
+  color: #376b51;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+.sheet-folder-tab.drop-target {
+  background: #d8ebdf;
+  box-shadow: inset 0 0 0 2px #4f8b6d;
+}
+.sheet-folder-tab > button:first-child {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 8px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.sheet-folder-tab > button:first-child svg {
+  width: 12px;
+  height: 12px;
+  fill: #cfe0d5;
+}
+.sheet-folder-tab > button:first-child small {
+  margin-left: auto;
+}
+.sheet-folder-state {
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  opacity: 0.65;
+  transform: rotate(-45deg);
+  transition: transform 140ms ease;
+}
+.sheet-folder-tab > button:first-child[aria-expanded="true"] .sheet-folder-state {
+  transform: translateY(-1px) rotate(45deg);
+}
+.sheet-folder-tab > button:last-child {
+  width: 20px;
+  border: 0;
+  background: transparent;
+  color: #8a978f;
+  font-size: 11px;
+}
+.sheet-folder-tab > button:last-child:hover {
+  color: #bd5757;
+  background: #f8e9e9;
+}
+.sheet-folder-tab.empty {
+  background: #f1f5f2;
+  border: 1px dashed #9bb5a5;
+  border-block: 0;
+}
+.sheet-tab.in-folder {
+  background: linear-gradient(90deg, #f1f7f3 0 5px, #fbfdfb 5px 100%);
+  border-right-color: #dde6e0;
 }
 .sheet-tabs > button.active {
   background: #fff;
@@ -5077,22 +5162,22 @@ svg {
   font-weight: 750;
 }
 .sheet-color-button {
-  flex: 0 0 14px;
-  width: 14px;
-  height: 14px;
+  flex: 0 0 11px;
+  width: 11px;
+  height: 11px;
   align-self: center;
-  margin-left: 9px;
+  margin-left: 8px;
   padding: 0;
-  border: 2px solid #fff;
-  border-radius: 4px;
+  border: 1.5px solid #fff;
+  border-radius: 3px;
   box-shadow: 0 0 0 1px #cbd6cf;
   cursor: pointer;
 }
 .sheet-color-button:hover,
 .sheet-color-button:focus-visible {
   box-shadow:
-    0 0 0 2px #fff,
-    0 0 0 4px #7aa18c;
+    0 0 0 1.5px #fff,
+    0 0 0 3px #7aa18c;
   outline: 0;
 }
 .sheet-tab-name-editor {
@@ -5168,7 +5253,21 @@ svg {
   background: #e5f0e9;
   color: #205f42;
 }
+.sheet-tab-relation:not(.has-relations) {
+  align-self: stretch;
+  height: auto;
+  margin: -3px 0 0;
+  padding: 3px 0 0;
+  box-sizing: content-box;
+}
 .sheet-tab-close {
+  align-self: stretch;
+  height: auto;
+  margin: -3px 0 0;
+  padding: 3px 0 0;
+  display: grid;
+  place-items: center;
+  box-sizing: content-box;
   color: #98a19b;
   font-size: 12px;
 }
@@ -5594,15 +5693,30 @@ svg {
 .relation-choice-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 7px;
+  column-gap: 14px;
+  row-gap: 14px;
+}
+.relation-choice-help {
+  margin: -6px 0 13px;
+  color: #78857e;
+  font-size: 8px;
+  line-height: 1.5;
 }
 .relation-choice-grid button {
-  min-height: 66px;
+  min-height: 112px;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
   border: 1px solid #dce3de;
   background: #fff;
   border-radius: 8px;
-  padding: 10px;
+  padding: 13px;
   text-align: left;
+}
+.relation-choice-grid button:hover {
+  border-color: #9dbbad;
+  background: #f8fbf9;
 }
 .relation-choice-grid button.active {
   border-color: #3e7b5b;
@@ -5614,10 +5728,46 @@ svg {
   display: block;
   font-size: 9px;
 }
+.relation-choice-grid strong {
+  color: #263c31;
+  font-size: 10px;
+}
 .relation-choice-grid small {
-  font-size: 7px;
+  font-size: 7.5px;
   color: #88938c;
-  margin-top: 4px;
+  margin-top: 5px;
+  line-height: 1.45;
+}
+.relation-card-copy em {
+  display: block;
+  margin-top: 7px;
+  color: #3c7658;
+  font-size: 7px;
+  font-style: normal;
+  font-weight: 700;
+}
+.relation-card-icon {
+  width: 68px;
+  height: 58px;
+  display: block;
+  padding: 3px;
+  border-radius: 10px;
+  background: #edf5f0;
+  overflow: visible;
+}
+.relation-card-lines line {
+  stroke: #75a58d;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.relation-card-nodes rect {
+  background: #fff;
+  fill: #fff;
+  stroke: #3c7a5a;
+  stroke-width: 2.5;
+}
+.relation-choice-grid button.active .relation-card-icon {
+  background: #dceee3;
 }
 .relation-column-picks {
   display: grid;
@@ -5982,6 +6132,39 @@ svg {
 .sheet-settings-modal textarea:focus {
   border-color: #5d8f77;
   box-shadow: 0 0 0 3px #5d8f771c;
+}
+.sheet-folder-editor-modal {
+  width: min(390px, calc(100vw - 32px));
+}
+.sheet-folder-editor-modal > section {
+  padding: 18px;
+}
+.sheet-folder-editor-modal > section label {
+  display: grid;
+  gap: 7px;
+  color: #59675f;
+  font-size: 8px;
+  font-weight: 750;
+}
+.sheet-folder-editor-modal > section input {
+  width: 100%;
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid #d8e1db;
+  border-radius: 7px;
+  outline: 0;
+  color: #30473a;
+  font-size: 10px;
+}
+.sheet-folder-editor-modal > section input:focus {
+  border-color: #4f8b6d;
+  box-shadow: 0 0 0 3px #4f8b6d1a;
+}
+.sheet-folder-editor-modal > section > small {
+  display: block;
+  margin-top: 8px;
+  color: #89958e;
+  font-size: 7px;
 }
 .sheet-color-setting span {
   display: flex;
