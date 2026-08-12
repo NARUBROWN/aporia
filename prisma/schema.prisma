@@ -8,18 +8,167 @@ datasource db {
 }
 
 model Project {
-  id        String   @id @db.Text
-  name      String   @db.Text
-  document  Json     @default("{}")
-  version   BigInt   @default(1)
-  passwordHash String? @map("password_hash") @db.Text
-  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-  snapshots ProjectSnapshot[]
+  id           String            @id @db.Text
+  name         String            @db.Text
+  document     Json              @default("{}")
+  version      BigInt            @default(1)
+  passwordHash String?           @map("password_hash") @db.Text
+  deletedAt    DateTime?         @map("deleted_at") @db.Timestamptz(6)
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  snapshots    ProjectSnapshot[]
+  sheets       ProjectSheet[]
+  seedBatches  SeedBatch[]
 
   @@index([deletedAt])
   @@map("projects")
+}
+
+model ProjectSheet {
+  id                String                  @id @db.Uuid
+  projectId         String                  @map("project_id") @db.Text
+  name              String                  @db.Text
+  physicalTableName String                  @unique @map("physical_table_name") @db.Text
+  color             String?                 @db.Text
+  comment           String?                 @db.Text
+  displayOrder      Int                     @default(0) @map("display_order")
+  origin            String                  @default("manual") @db.Text
+  seedBatchId       String?                 @map("seed_batch_id") @db.Uuid
+  rowCount          BigInt                  @default(0) @map("row_count")
+  dataRevision      BigInt                  @default(0) @map("data_revision")
+  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime                @updatedAt @map("updated_at") @db.Timestamptz(6)
+  project           Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  seedBatch         SeedBatch?              @relation(fields: [seedBatchId], references: [id], onDelete: SetNull)
+  columns           SheetColumn[]
+  outgoingRelations SheetRelation[]         @relation("RelationSourceSheet")
+  incomingRelations SheetRelation[]         @relation("RelationTargetSheet")
+  calculatedFields  CalculatedFieldRecord[]
+
+  @@unique([projectId, name])
+  @@index([projectId, displayOrder])
+  @@map("project_sheets")
+}
+
+model SheetColumn {
+  id                    String                 @id @db.Uuid
+  sheetId               String                 @map("sheet_id") @db.Uuid
+  name                  String                 @db.Text
+  physicalColumnName    String                 @map("physical_column_name") @db.Text
+  dataType              String                 @map("data_type") @db.Text
+  displayOrder          Int                    @default(0) @map("display_order")
+  color                 String?                @db.Text
+  comment               String?                @db.Text
+  nullable              Boolean                @default(true)
+  primaryKey            Boolean                @default(false) @map("primary_key")
+  sheet                 ProjectSheet           @relation(fields: [sheetId], references: [id], onDelete: Cascade)
+  sourceRelations       SheetRelation[]        @relation("RelationSourceColumn")
+  targetRelations       SheetRelation[]        @relation("RelationTargetColumn")
+  calculationConditions CalculationCondition[]
+
+  @@unique([sheetId, name])
+  @@unique([sheetId, physicalColumnName])
+  @@index([sheetId, displayOrder])
+  @@map("sheet_columns")
+}
+
+model SheetRelation {
+  id             String       @id @db.Uuid
+  sourceSheetId  String       @map("source_sheet_id") @db.Uuid
+  sourceColumnId String       @map("source_column_id") @db.Uuid
+  targetSheetId  String       @map("target_sheet_id") @db.Uuid
+  targetColumnId String       @map("target_column_id") @db.Uuid
+  relationType   String       @map("relation_type") @db.Text
+  relationOrigin String       @default("manual") @map("relation_origin") @db.Text
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  sourceSheet    ProjectSheet @relation("RelationSourceSheet", fields: [sourceSheetId], references: [id], onDelete: Cascade)
+  targetSheet    ProjectSheet @relation("RelationTargetSheet", fields: [targetSheetId], references: [id], onDelete: Cascade)
+  sourceColumn   SheetColumn  @relation("RelationSourceColumn", fields: [sourceColumnId], references: [id], onDelete: Cascade)
+  targetColumn   SheetColumn  @relation("RelationTargetColumn", fields: [targetColumnId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceColumnId, targetColumnId])
+  @@index([sourceSheetId])
+  @@index([targetSheetId])
+  @@map("sheet_relations")
+}
+
+model CalculatedFieldRecord {
+  id           String                 @id @db.Uuid
+  sheetId      String                 @map("sheet_id") @db.Uuid
+  name         String                 @db.Text
+  fieldType    String                 @map("field_type") @db.Text
+  color        String?                @db.Text
+  displayOrder Int                    @default(0) @map("display_order")
+  createdAt    DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
+  sheet        ProjectSheet           @relation(fields: [sheetId], references: [id], onDelete: Cascade)
+  rules        CalculationRule[]
+  conditions   CalculationCondition[]
+
+  @@unique([sheetId, name])
+  @@index([sheetId, displayOrder])
+  @@map("calculated_fields")
+}
+
+model CalculationRule {
+  id                String                @id @db.Uuid
+  calculatedFieldId String                @map("calculated_field_id") @db.Uuid
+  stepOrder         Int                   @map("step_order")
+  operation         String                @db.Text
+  arguments         Json                  @default("{}")
+  calculatedField   CalculatedFieldRecord @relation(fields: [calculatedFieldId], references: [id], onDelete: Cascade)
+
+  @@unique([calculatedFieldId, stepOrder])
+  @@map("calculation_rules")
+}
+
+model CalculationCondition {
+  id                String                @id @db.Uuid
+  calculatedFieldId String                @map("calculated_field_id") @db.Uuid
+  sourceColumnId    String?               @map("source_column_id") @db.Uuid
+  conditionOrder    Int                   @map("condition_order")
+  operator          String                @db.Text
+  operandType       String                @map("operand_type") @db.Text
+  operandValue      String?               @map("operand_value") @db.Text
+  calculatedField   CalculatedFieldRecord @relation(fields: [calculatedFieldId], references: [id], onDelete: Cascade)
+  sourceColumn      SheetColumn?          @relation(fields: [sourceColumnId], references: [id], onDelete: SetNull)
+
+  @@unique([calculatedFieldId, conditionOrder])
+  @@map("calculation_conditions")
+}
+
+model SeedBatch {
+  id             String         @id @db.Uuid
+  projectId      String         @map("project_id") @db.Text
+  sourceFilename String         @map("source_filename") @db.Text
+  sourceHash     String         @map("source_hash") @db.Text
+  status         String         @default("pending") @db.Text
+  importedRows   BigInt         @default(0) @map("imported_rows")
+  failedRows     BigInt         @default(0) @map("failed_rows")
+  startedAt      DateTime?      @map("started_at") @db.Timestamptz(6)
+  completedAt    DateTime?      @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  project        Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sheets         ProjectSheet[]
+  errors         SeedError[]
+
+  @@unique([projectId, sourceHash])
+  @@index([projectId, createdAt(sort: Desc)])
+  @@map("seed_batches")
+}
+
+model SeedError {
+  id           String    @id @db.Uuid
+  seedBatchId  String    @map("seed_batch_id") @db.Uuid
+  sourceTable  String    @map("source_table") @db.Text
+  sourceRow    BigInt?   @map("source_row")
+  errorCode    String    @map("error_code") @db.Text
+  errorMessage String    @map("error_message") @db.Text
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  seedBatch    SeedBatch @relation(fields: [seedBatchId], references: [id], onDelete: Cascade)
+
+  @@index([seedBatchId, sourceTable])
+  @@map("seed_errors")
 }
 
 model ProjectSnapshot {

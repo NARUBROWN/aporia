@@ -34,11 +34,52 @@ type Sheet = {
   color?: string;
   comment?: string;
   columnComments?: Record<string, string>;
+  columnColors?: Record<string, string>;
   columns: string[];
   columnTypes?: (ColumnType | null)[];
   rowIds: string[];
   rows: string[][];
+  normalized?: boolean;
+  rowCount?: number;
+  nextCursor?: string | null;
 };
+
+type NormalizedSheetPayload = {
+  seedBatch?: { status?: string } | null;
+  relations?: Array<{
+    id: string;
+    sourceSheetId: string;
+    sourceColumn: string;
+    targetSheetId: string;
+    targetColumn: string;
+    relationType: SheetRelation["relationType"];
+  }>;
+  sheets?: Array<{
+    id: string;
+    name: string;
+    color?: string | null;
+    comment?: string | null;
+    rowCount: number;
+    columns: Array<{
+      name: string;
+      dataType: string;
+      color?: string | null;
+      comment?: string | null;
+    }>;
+  }>;
+};
+
+function normalizedColumnType(type: string): ColumnType {
+  const value = type.toLowerCase();
+  if (value.includes("date") || value.includes("time")) return "date";
+  if (value.includes("bool")) return "boolean";
+  if (/int|numeric|decimal|real|double|money/.test(value)) return "number";
+  return "text";
+}
+
+function sheetRowCount(sheet: Sheet) {
+  return sheet.normalized ? (sheet.rowCount ?? 0) : sheet.rows.length;
+}
 type DisplayBinding = {
   sheetId: string;
   field: string;
@@ -92,6 +133,7 @@ type FormulaToken =
 type ArithmeticCalculatedField = {
   id: string;
   kind?: "arithmetic";
+  color?: string;
   name: string;
   resultSheetId: string;
   relationIds: string[];
@@ -119,6 +161,7 @@ type ConditionalSumCondition = {
 type ConditionalSumField = {
   id: string;
   kind: "conditionalSum";
+  color?: string;
   name: string;
   resultSheetId: string;
   sourceSheetId: string;
@@ -126,13 +169,37 @@ type ConditionalSumField = {
   valueColumn: string;
   conditions: ConditionalSumCondition[];
 };
-type CalculatedField = ArithmeticCalculatedField | ConditionalSumField;
+type TransformStep =
+  | { id: string; type: "takeLeft" | "takeRight"; length: number }
+  | { id: string; type: "substring"; start: number; length: number }
+  | { id: string; type: "digitsOnly" | "trim" };
+type TransformCalculatedField = {
+  id: string;
+  kind: "transform";
+  color?: string;
+  name: string;
+  resultSheetId: string;
+  sourceColumn: string;
+  condition: {
+    enabled: boolean;
+    column: string;
+    operator: "eq" | "contains" | "startsWith" | "endsWith";
+    value: string;
+  };
+  steps: TransformStep[];
+  fallback: "empty" | "original";
+};
+type CalculatedField =
+  | ArithmeticCalculatedField
+  | ConditionalSumField
+  | TransformCalculatedField;
 type CalculationDraft = {
   relationIds: string[];
   formula: FormulaToken[];
   name: string;
 };
 type ConditionalSumDraft = Omit<ConditionalSumField, "id" | "kind">;
+type TransformDraft = Omit<TransformCalculatedField, "id" | "kind">;
 type NewColumnDraft = {
   name: string;
   type: ColumnType;
@@ -586,6 +653,18 @@ function isConditionalSumField(
   return field.kind === "conditionalSum";
 }
 
+function isTransformField(
+  field: CalculatedField,
+): field is TransformCalculatedField {
+  return field.kind === "transform";
+}
+
+function isArithmeticField(
+  field: CalculatedField,
+): field is ArithmeticCalculatedField {
+  return !isConditionalSumField(field) && !isTransformField(field);
+}
+
 function conditionalOperatorLabel(operator: ConditionalOperator) {
   return {
     eq: "같음",
@@ -600,6 +679,7 @@ function conditionalOperatorLabel(operator: ConditionalOperator) {
 }
 
 function calculatedFieldRelationIds(field: CalculatedField) {
+  if (isTransformField(field)) return [];
   return isConditionalSumField(field)
     ? [
         ...new Set([
@@ -610,6 +690,42 @@ function calculatedFieldRelationIds(field: CalculatedField) {
         ]),
       ]
     : field.relationIds;
+}
+
+function calculateTransformField(
+  field: TransformCalculatedField,
+  sheets: Sheet[],
+  resultRowId: string,
+) {
+  const sheet = sheets.find((item) => item.id === field.resultSheetId);
+  if (!sheet) return "";
+  const row = sheet.rows[sheet.rowIds.indexOf(resultRowId)];
+  if (!row) return "";
+  const source = row[sheet.columns.indexOf(field.sourceColumn)] ?? "";
+  if (field.condition.enabled) {
+    const conditionValue =
+      row[sheet.columns.indexOf(field.condition.column)] ?? "";
+    const matches =
+      field.condition.operator === "eq"
+        ? conditionValue === field.condition.value
+        : field.condition.operator === "contains"
+          ? conditionValue.includes(field.condition.value)
+          : field.condition.operator === "startsWith"
+            ? conditionValue.startsWith(field.condition.value)
+            : conditionValue.endsWith(field.condition.value);
+    if (!matches) return field.fallback === "original" ? source : "";
+  }
+  return field.steps.reduce((value, step) => {
+    if (step.type === "digitsOnly") return value.replace(/\D/g, "");
+    if (step.type === "trim") return value.trim();
+    if (step.type === "takeLeft") return value.slice(0, step.length);
+    if (step.type === "takeRight") return value.slice(-step.length);
+    if (step.type === "substring") {
+      const start = Math.max(0, step.start - 1);
+      return value.slice(start, start + step.length);
+    }
+    return value;
+  }, source);
 }
 
 function relationAllowsSingleRowFrom(
@@ -891,6 +1007,8 @@ function calculateFieldValue(
   const nextResolvingFieldIds = new Set(resolvingFieldIds).add(field.id);
   if (isConditionalSumField(field))
     return calculateConditionalSum(field, relations, sheets, resultRowId);
+  if (isTransformField(field))
+    return calculateTransformField(field, sheets, resultRowId);
   const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
   const values: number[] = [];
   const operators: CalculationOperator[] = [];
@@ -1218,7 +1336,7 @@ function ComponentDataPanel({
           >
             {sheets.map((sheet) => (
               <option key={sheet.id} value={sheet.id}>
-                {sheet.name} · {sheet.rows.length}개
+                {sheet.name} · {sheetRowCount(sheet)}개
               </option>
             ))}
           </select>
@@ -1933,7 +2051,7 @@ function SheetErdView({
                   style={{ background: sheet.color ?? undefined }}
                 />
                 <strong>{sheet.name}</strong>
-                <small>{sheet.rows.length}행</small>
+                <small>{sheetRowCount(sheet)}행</small>
               </span>
               <span className="sheet-erd-fields">
                 {sheet.columns.map((column, index) => (
@@ -1977,6 +2095,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     zoom: 0.9,
   });
   const [sheets, setSheets] = useState<Sheet[]>(isTemporary ? [] : initialSheets);
+  const normalizedRowsLoadingRef = useRef(new Set<string>());
+  const [loadingNormalizedSheetIds, setLoadingNormalizedSheetIds] = useState<
+    string[]
+  >([]);
   const [cellValidationErrors, setCellValidationErrors] = useState<
     Record<string, string>
   >({});
@@ -1997,6 +2119,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   );
   const [columnNameDraft, setColumnNameDraft] = useState("");
   const [columnCommentDraft, setColumnCommentDraft] = useState("");
+  const [columnColorDraft, setColumnColorDraft] = useState("");
   const [fieldMenuOpen, setFieldMenuOpen] = useState(false);
   const [newColumnDraft, setNewColumnDraft] = useState<NewColumnDraft | null>(
     null,
@@ -2014,6 +2137,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     useState<CalculationDraft | null>(null);
   const [conditionalSumDraft, setConditionalSumDraft] =
     useState<ConditionalSumDraft | null>(null);
+  const [transformDraft, setTransformDraft] =
+    useState<TransformDraft | null>(null);
   const [editingCalculatedFieldId, setEditingCalculatedFieldId] = useState<
     string | null
   >(null);
@@ -2089,6 +2214,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     sheets.find((sheet) => sheet.id === activeSheetId) ??
     sheets[0] ??
     emptySheet;
+  const activeSheetRowsLoading = loadingNormalizedSheetIds.includes(
+    activeSheet.id,
+  );
   const sheetSearchResults = sheets.filter((sheet) =>
     sheet.name
       .toLocaleLowerCase("ko-KR")
@@ -2237,7 +2365,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       pages,
       activePageId,
       canvasView,
-      sheets,
+      sheets: sheets.filter((sheet) => !sheet.normalized),
       dataBinding,
       displayBindings,
       sheetRelations,
@@ -2458,7 +2586,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           };
         }>;
       })
-      .then((payload) => {
+      .then(async (payload) => {
         if (cancelled) return;
         if (payload.project?.name)
           setDisplayProjectName(payload.project.name);
@@ -2493,10 +2621,63 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 isConditionalSumField(field)
                   ? Array.isArray(field.relationPath) &&
                     Array.isArray(field.conditions)
+                  : isTransformField(field)
+                    ? typeof field.sourceColumn === "string" &&
+                      Array.isArray(field.steps)
                   : Array.isArray(field.formula) &&
                     Array.isArray(field.relationIds),
             ),
           );
+        const normalizedResponse = await fetch(`/api/projects/${projectId}/sheets`, {
+          cache: "no-store",
+        });
+        if (normalizedResponse.ok) {
+          const normalized = (await normalizedResponse.json()) as NormalizedSheetPayload;
+          if (
+            normalized.seedBatch?.status === "completed" &&
+            Array.isArray(normalized.sheets) &&
+            normalized.sheets.length > 0
+          ) {
+            const nextSheets: Sheet[] = normalized.sheets.map((sheet) => ({
+              id: sheet.id,
+              name: sheet.name,
+              color: sheet.color ?? undefined,
+              comment: sheet.comment ?? undefined,
+              columns: sheet.columns.map((column) => column.name),
+              columnTypes: sheet.columns.map((column) =>
+                normalizedColumnType(column.dataType),
+              ),
+              columnColors: Object.fromEntries(
+                sheet.columns.flatMap((column) =>
+                  column.color ? [[column.name, column.color]] : [],
+                ),
+              ),
+              columnComments: Object.fromEntries(
+                sheet.columns.flatMap((column) =>
+                  column.comment ? [[column.name, column.comment]] : [],
+                ),
+              ),
+              rowIds: [],
+              rows: [],
+              normalized: true,
+              rowCount: sheet.rowCount,
+              nextCursor: null,
+            }));
+            setSheets(nextSheets);
+            setActiveSheetId(
+              nextSheets.find((sheet) => sheet.name === "COT유틸Total")?.id ??
+                nextSheets[0].id,
+            );
+            setSheetRelations(
+              (normalized.relations ?? []).map((relation) => ({
+                ...relation,
+                updateOption: "none",
+                links: [],
+              })),
+            );
+            setCalculatedFields([]);
+          }
+        }
         setSaveStatus("PostgreSQL에서 불러옴");
       })
       .catch(() => {
@@ -2509,6 +2690,67 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       cancelled = true;
     };
   }, [projectId]);
+
+  const loadNormalizedRows = useCallback(
+    async (sheetId: string, cursor?: string | null) => {
+      if (!projectId || normalizedRowsLoadingRef.current.has(sheetId)) return;
+      normalizedRowsLoadingRef.current.add(sheetId);
+      setLoadingNormalizedSheetIds((current) =>
+        current.includes(sheetId) ? current : [...current, sheetId],
+      );
+      try {
+        const parameters = new URLSearchParams({ limit: "100" });
+        if (cursor) parameters.set("cursor", cursor);
+        const response = await fetch(
+          `/api/projects/${projectId}/sheets/${sheetId}/rows?${parameters}`,
+          { cache: "no-store" },
+        );
+        if (!response.ok)
+          throw new Error("정규화 시트 데이터를 불러오지 못했습니다.");
+        const payload = (await response.json()) as {
+          rows?: Array<{ id: string; values: string[] }>;
+          nextCursor?: string | null;
+        };
+        if (!Array.isArray(payload.rows)) return;
+        setSheets((current) =>
+          current.map((sheet) => {
+            if (sheet.id !== sheetId) return sheet;
+            const knownIds = new Set(sheet.rowIds);
+            const nextRows = payload.rows!.filter((row) => !knownIds.has(row.id));
+            return {
+              ...sheet,
+              rowIds: [...sheet.rowIds, ...nextRows.map((row) => row.id)],
+              rows: [...sheet.rows, ...nextRows.map((row) => row.values)],
+              nextCursor: payload.nextCursor ?? null,
+            };
+          }),
+        );
+      } catch {
+        setSaveStatus("시트 데이터 조회 실패");
+      } finally {
+        normalizedRowsLoadingRef.current.delete(sheetId);
+        setLoadingNormalizedSheetIds((current) =>
+          current.filter((id) => id !== sheetId),
+        );
+      }
+    },
+    [projectId],
+  );
+
+  useEffect(() => {
+    if (
+      !hydrated ||
+      !activeSheet.normalized ||
+      activeSheet.rows.length > 0 ||
+      (activeSheet.rowCount ?? 0) === 0
+    )
+      return;
+    const sheetId = activeSheet.id;
+    const timeout = window.setTimeout(() => {
+      void loadNormalizedRows(sheetId);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [activeSheet, hydrated, loadNormalizedRows]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -2588,7 +2830,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             pages,
             activePageId,
             canvasView,
-            sheets,
+            sheets: sheets.filter((sheet) => !sheet.normalized),
             dataBinding,
             displayBindings,
             sheetRelations,
@@ -2797,6 +3039,17 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setSheetSettingsOpen(false);
   }
 
+  function updateCalculatedFieldColor(fieldId: string, color: string) {
+    setCalculatedFields((current) =>
+      current.map((field) =>
+        field.id === fieldId ? { ...field, color } : field,
+      ),
+    );
+    setInspectingCalculatedField((current) =>
+      current?.id === fieldId ? { ...current, color } : current,
+    );
+  }
+
   function moveSheetTab(
     sourceSheetId: string,
     targetSheetId: string,
@@ -2878,6 +3131,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               !field.conditions.some(
                 (condition) => condition.sheetId === sheetToDelete.id,
               )
+            : isTransformField(field)
+              ? true
             : !field.formula.some(
                 (token) =>
                   token.kind === "field" &&
@@ -3054,6 +3309,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setColumnCommentDraft(
       activeSheet.columnComments?.[activeSheet.columns[columnIndex]] ?? "",
     );
+    setColumnColorDraft(
+      activeSheet.columnColors?.[activeSheet.columns[columnIndex]] ?? "",
+    );
   }
 
   function saveColumnName() {
@@ -3076,6 +3334,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   ([column]) => column !== previous,
                 ),
                 [name, columnCommentDraft.trim()],
+              ]),
+              columnColors: Object.fromEntries([
+                ...Object.entries(sheet.columnColors ?? {}).filter(
+                  ([column]) => column !== previous,
+                ),
+                ...(columnColorDraft ? [[name, columnColorDraft]] : []),
               ]),
             },
       ),
@@ -3141,6 +3405,11 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   ([name]) => name !== column,
                 ),
               ),
+              columnColors: Object.fromEntries(
+                Object.entries(sheet.columnColors ?? {}).filter(
+                  ([name]) => name !== column,
+                ),
+              ),
               rows: sheet.rows.map((row) =>
                 row.filter((_, index) => index !== columnIndex),
               ),
@@ -3196,6 +3465,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     condition.operand.kind === "currentRowField" &&
                     condition.operand.column === column,
                 ))
+            );
+          if (isTransformField(field))
+            return !(
+              field.resultSheetId === activeSheet.id &&
+              (field.sourceColumn === column ||
+                (field.condition.enabled && field.condition.column === column))
             );
           return !field.formula.some(
             (token) =>
@@ -3297,6 +3572,18 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       });
       return;
     }
+    if (isTransformField(field)) {
+      setTransformDraft({
+        name: field.name,
+        resultSheetId: field.resultSheetId,
+        sourceColumn: field.sourceColumn,
+        condition: field.condition,
+        steps: field.steps,
+        fallback: field.fallback,
+        color: field.color,
+      });
+      return;
+    }
     setCalculationDraft({
       name: field.name,
       relationIds: field.relationIds,
@@ -3306,6 +3593,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   function closeCalculatedFieldEditor() {
     setConditionalSumDraft(null);
+    setTransformDraft(null);
     setCalculationDraft(null);
     setEditingCalculatedFieldId(null);
   }
@@ -3317,7 +3605,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const previous = current.find((field) => field.id === nextField.id);
     return current.map((field) => {
       if (field.id === nextField.id) return nextField;
-      if (!previous || previous.name === nextField.name || isConditionalSumField(field))
+      if (!previous || previous.name === nextField.name || !isArithmeticField(field))
         return field;
       return {
         ...field,
@@ -3330,6 +3618,66 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         ),
       };
     });
+  }
+
+  function startTransform() {
+    const sourceColumn = activeSheet.columns[0] ?? "";
+    if (!sourceColumn) return;
+    setTransformDraft({
+      name: `${sourceColumn} 정제`,
+      resultSheetId: activeSheet.id,
+      sourceColumn,
+      condition: {
+        enabled: false,
+        column: sourceColumn,
+        operator: "contains",
+        value: "",
+      },
+      steps: [{ id: crypto.randomUUID(), type: "trim" }],
+      fallback: "empty",
+    });
+    setEditingCalculatedFieldId(null);
+  }
+
+  function addTransformStep() {
+    setTransformDraft((current) =>
+      current && current.steps.length < 10
+        ? {
+            ...current,
+            steps: [
+              ...current.steps,
+              { id: crypto.randomUUID(), type: "takeRight", length: 6 },
+            ],
+          }
+        : current,
+    );
+  }
+
+  function saveTransformField() {
+    if (!transformDraft?.name.trim() || !transformDraft.sourceColumn) return;
+    const name = transformDraft.name.trim();
+    if (
+      activeSheet.columns.includes(name) ||
+      activeCalculatedFields.some(
+        (field) => field.name === name && field.id !== editingCalculatedFieldId,
+      )
+    )
+      return;
+    setCalculatedFields((current) => {
+      const nextField: TransformCalculatedField = {
+        ...transformDraft,
+        id: editingCalculatedFieldId ?? crypto.randomUUID(),
+        kind: "transform",
+        name,
+        resultSheetId: activeSheet.id,
+      };
+      return editingCalculatedFieldId
+        ? replaceCalculatedField(current, nextField)
+        : [...current, nextField];
+    });
+    updateBindingsForCalculatedFieldRename(name);
+    setTransformDraft(null);
+    setEditingCalculatedFieldId(null);
   }
 
   function updateBindingsForCalculatedFieldRename(nextName: string) {
@@ -3531,7 +3879,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   function deleteCalculatedField(field: CalculatedField) {
     const dependents = calculatedFields.filter(
       (candidate) =>
-        !isConditionalSumField(candidate) &&
+        isArithmeticField(candidate) &&
         candidate.formula.some(
           (token) =>
             token.kind === "field" &&
@@ -4702,7 +5050,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       }
                     }}
                   />
-                  <small>{sheet.rows.length}</small>
+                  <small>{sheetRowCount(sheet)}</small>
                 </div>
               ) : (
                 <button
@@ -4717,7 +5065,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   }}
                 >
                   {sheet.name}
-                  <small>{sheet.rows.length}</small>
+                  <small>{sheetRowCount(sheet)}</small>
                 </button>
               )}
               {sheets.length > 1 && (
@@ -4788,7 +5136,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   >
                     <span className="table-dot" />
                     <strong>{sheet.name}</strong>
-                    <small>{sheet.rows.length}개 행</small>
+                    <small>{sheetRowCount(sheet)}개 행</small>
                   </button>
                 ))
               )}
@@ -4826,7 +5174,24 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             </>
           ) : (
           <>
-            <div className="sheet-grid-wrap">
+            <div
+              className="sheet-grid-wrap"
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                const reachedBottom =
+                  element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+                if (
+                  reachedBottom &&
+                  activeSheet.normalized &&
+                  activeSheet.nextCursor &&
+                  !activeSheetRowsLoading
+                )
+                  void loadNormalizedRows(
+                    activeSheet.id,
+                    activeSheet.nextCursor,
+                  );
+              }}
+            >
               <table className="sheet-grid">
                 <thead>
                   <tr>
@@ -4836,6 +5201,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                         key={`${column}-${index}`}
                         className="editable-column"
                         title={activeSheet.columnComments?.[column] || undefined}
+                        style={
+                          activeSheet.columnColors?.[column]
+                            ? {
+                                background: `color-mix(in srgb, ${activeSheet.columnColors[column]} 18%, white)`,
+                                borderTop: `3px solid ${activeSheet.columnColors[column]}`,
+                              }
+                            : undefined
+                        }
                       >
                         <span className="field-number">#{index + 1}</span>
                         <span className="field-type">
@@ -4900,6 +5273,42 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                 }
                               />
                             </label>
+                            <fieldset className="column-color-setting">
+                              <legend>컬럼 색상</legend>
+                              <div
+                                className="column-color-palette"
+                                aria-label="컬럼 색상 팔레트"
+                              >
+                                {sheetColorPalette.map((color) => (
+                                  <button
+                                    key={color}
+                                    type="button"
+                                    className={
+                                      columnColorDraft.toLowerCase() ===
+                                      color.toLowerCase()
+                                        ? "selected"
+                                        : ""
+                                    }
+                                    style={{ background: color }}
+                                    aria-label={`${color} 컬럼 색상 선택`}
+                                    aria-pressed={
+                                      columnColorDraft.toLowerCase() ===
+                                      color.toLowerCase()
+                                    }
+                                    onClick={() => setColumnColorDraft(color)}
+                                  />
+                                ))}
+                                <button
+                                  type="button"
+                                  className={`column-color-reset${!columnColorDraft ? " selected" : ""}`}
+                                  aria-label="컬럼 색상 없음"
+                                  aria-pressed={!columnColorDraft}
+                                  onClick={() => setColumnColorDraft("")}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            </fieldset>
                             <div>
                               <button onClick={saveColumnName}>저장</button>
                               <button
@@ -4914,7 +5323,18 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       </th>
                     ))}
                     {activeCalculatedFields.map((field, index) => (
-                      <th key={field.id} className="calculated-column">
+                      <th
+                        key={field.id}
+                        className="calculated-column"
+                        style={
+                          field.color
+                            ? {
+                                background: `${field.color}18`,
+                                color: field.color,
+                              }
+                            : undefined
+                        }
+                      >
                         <button
                           className="calculated-column-details"
                           aria-label={`${field.name} 계산식 보기`}
@@ -4923,7 +5343,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                           <span className="field-number">
                             #{activeSheet.columns.length + index + 1}
                           </span>
-                          <span className="field-type fx">fx</span>
+                          <span
+                            className="field-type fx"
+                            style={
+                              field.color ? { background: field.color } : undefined
+                            }
+                          >
+                            fx
+                          </span>
                           <span>{field.name}</span>
                         </button>
                         <button
@@ -4960,6 +5387,19 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                             <span>
                               <strong>일반 필드</strong>
                               <small>값을 직접 입력하는 필드</small>
+                            </span>
+                          </button>
+                          <button
+                            role="menuitem"
+                            onClick={() => {
+                              setFieldMenuOpen(false);
+                              startTransform();
+                            }}
+                          >
+                            <span className="field-menu-icon fx">⇥</span>
+                            <span>
+                              <strong>값 정제 필드</strong>
+                              <small>현재 시트의 값을 잘라내거나 숫자만 추출해요</small>
                             </span>
                           </button>
                           <button
@@ -5045,7 +5485,17 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                         const validationError = cellValidationErrors[errorKey];
                         const errorId = `cell-error-${rowId}-${columnIndex}`;
                         return (
-                        <td key={column} className={validationError ? "invalid-cell" : undefined}>
+                        <td
+                          key={column}
+                          className={validationError ? "invalid-cell" : undefined}
+                          style={
+                            activeSheet.columnColors?.[column]
+                              ? {
+                                  background: `color-mix(in srgb, ${activeSheet.columnColors[column]} 7%, white)`,
+                                }
+                              : undefined
+                          }
+                        >
                           {activeSheet.columnTypes?.[columnIndex] ===
                           "boolean" ? (
                             <select
@@ -5107,7 +5557,18 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       })}
                       {activeCalculatedFields.map((field) => {
                         return (
-                          <td key={field.id} className="calculated-cell">
+                          <td
+                            key={field.id}
+                            className="calculated-cell"
+                            style={
+                              field.color
+                                ? {
+                                    background: `${field.color}0D`,
+                                    color: field.color,
+                                  }
+                                : undefined
+                            }
+                          >
                             {calculateFieldValue(
                               field,
                               sheetRelations,
@@ -5129,6 +5590,22 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       </td>
                     </tr>
                   ))}
+                  {activeSheet.normalized &&
+                    (activeSheetRowsLoading || activeSheet.nextCursor) && (
+                      <tr className="sheet-loading-row">
+                        <td
+                          colSpan={
+                            activeSheet.columns.length +
+                            activeCalculatedFields.length +
+                            3
+                          }
+                        >
+                          {activeSheetRowsLoading
+                            ? "다음 행을 불러오는 중…"
+                            : `${activeSheet.rows.length.toLocaleString()} / ${sheetRowCount(activeSheet).toLocaleString()}행`}
+                        </td>
+                      </tr>
+                    )}
                   <tr className="new-row">
                     <th className="row-number">
                       <Icons.plus />
@@ -5166,7 +5643,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 필드{" "}
                 {activeSheet.columns.length + activeCalculatedFields.length}개
               </span>
-              <span>데이터 {activeSheet.rows.length}개</span>
+              <span>데이터 {sheetRowCount(activeSheet)}개</span>
               <span className="sheet-saved">
                 <Icons.check />
                 {isTemporary ? "임시 데이터" : "자동 저장됨"}
@@ -5260,7 +5737,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           const visit = (field: CalculatedField) => {
             if (visited.has(field.id)) return;
             visited.add(field.id);
-            if (!isConditionalSumField(field))
+            if (isArithmeticField(field))
               field.formula.forEach((token) => {
                 if (token.kind !== "field" || token.sheetId !== activeSheet.id)
                   return;
@@ -5393,7 +5870,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                             <em>
                               {isConditionalSumField(field)
                                 ? "조건 합계"
-                                : "파생 계산"}
+                                : isTransformField(field)
+                                  ? "값 정제"
+                                  : "파생 계산"}
                             </em>
                           </div>
                           {isConditionalSumField(field) ? (
@@ -5418,6 +5897,16 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                     ? condition.operand.value
                                     : `현재 행의 ${condition.operand.column}`}
                                 </p>
+                              ))}
+                            </div>
+                          ) : isTransformField(field) ? (
+                            <div className="developer-spec-formula">
+                              <b>{field.sourceColumn} 값을 순서대로 정제</b>
+                              {field.condition.enabled && (
+                                <p>조건: {field.condition.column} {field.condition.operator} {field.condition.value}</p>
+                              )}
+                              {field.steps.map((step, stepIndex) => (
+                                <p key={step.id}>단계 {stepIndex + 1}: {step.type}</p>
                               ))}
                             </div>
                           ) : (
@@ -5615,6 +6104,32 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     ×
                   </button>
                 </header>
+                <section className="calculated-field-color-setting">
+                  <small>표시 색상</small>
+                  <div className="sheet-color-palette" aria-label="fx 컬럼 기본 색상">
+                    {sheetColorPalette.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        className={field.color?.toLowerCase() === color.toLowerCase() ? "selected" : ""}
+                        style={{ background: color }}
+                        aria-label={`${color} fx 컬럼 색상 선택`}
+                        onClick={() => updateCalculatedFieldColor(field.id, color)}
+                      />
+                    ))}
+                    <label title="사용자 지정 색상">
+                      <input
+                        type="color"
+                        aria-label="fx 컬럼 사용자 지정 색상"
+                        value={field.color ?? "#2e7051"}
+                        onChange={(event) =>
+                          updateCalculatedFieldColor(field.id, event.target.value)
+                        }
+                      />
+                      <span>+</span>
+                    </label>
+                  </div>
+                </section>
                 <section>
                   <small>더할 값</small>
                   <h2>{sourceSheet.name} · {field.valueColumn}</h2>
@@ -5679,7 +6194,63 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           );
         })()}
       {inspectingCalculatedField &&
-        !isConditionalSumField(inspectingCalculatedField) &&
+        isTransformField(inspectingCalculatedField) &&
+        (() => {
+          const field = inspectingCalculatedField;
+          const resultSheet =
+            sheets.find((sheet) => sheet.id === field.resultSheetId) ?? emptySheet;
+          const preview = resultSheet.rowIds.slice(0, 5).map((rowId, index) => ({
+            rowId,
+            label: resultSheet.rows[index]?.[0] ?? `${index + 1}번 데이터`,
+            value: calculateTransformField(field, sheets, rowId),
+          }));
+          const stepLabel = (step: TransformStep) => {
+            if (step.type === "trim") return "앞뒤 공백 제거";
+            if (step.type === "digitsOnly") return "숫자만 남기기";
+            if (step.type === "takeLeft") return `앞에서 ${step.length}자리`;
+            if (step.type === "takeRight") return `뒤에서 ${step.length}자리`;
+            if (step.type === "substring")
+              return `${step.start}번째부터 ${step.length}자리`;
+            return "정제";
+          };
+          return (
+            <div className="relation-modal-backdrop" onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setInspectingCalculatedField(null);
+            }}>
+              <div className="relation-modal calculation-detail-modal" role="dialog" aria-modal="true" aria-label={`${field.name} 정제 규칙`}>
+                <header>
+                  <div><span className="fx-badge">⇥</span><strong>{field.name}</strong></div>
+                  <button aria-label="정제 규칙 닫기" onClick={() => setInspectingCalculatedField(null)}>×</button>
+                </header>
+                <section className="calculated-field-color-setting">
+                  <small>표시 색상</small>
+                  <div className="sheet-color-palette" aria-label="정제 컬럼 기본 색상">
+                    {sheetColorPalette.map((color) => (
+                      <button key={color} type="button" className={field.color?.toLowerCase() === color.toLowerCase() ? "selected" : ""} style={{ background: color }} aria-label={`${color} 정제 컬럼 색상 선택`} onClick={() => updateCalculatedFieldColor(field.id, color)} />
+                    ))}
+                    <label title="사용자 지정 색상"><input type="color" aria-label="정제 컬럼 사용자 지정 색상" value={field.color ?? "#2e7051"} onChange={(event) => updateCalculatedFieldColor(field.id, event.target.value)} /><span>+</span></label>
+                  </div>
+                </section>
+                <section>
+                  <small>원본과 조건</small>
+                  <h2>{resultSheet.name} · {field.sourceColumn}</h2>
+                  <p className="transform-rule-summary">{field.condition.enabled ? `${field.condition.column} 값이 '${field.condition.value}' 조건을 만족할 때 정제` : "모든 행에 적용"}</p>
+                </section>
+                <section>
+                  <small>정제 순서</small>
+                  <ol className="transform-rule-list">{field.steps.map((step) => <li key={step.id}>{stepLabel(step)}</li>)}</ol>
+                </section>
+                <section>
+                  <small>행별 결과 · 최대 5개</small>
+                  <div className="calculation-preview">{preview.map((item) => <div key={item.rowId}><span>{item.label}</span><strong>{item.value || "빈 값"}</strong></div>)}</div>
+                </section>
+                <footer><button onClick={() => editCalculatedField(field)}>정제 규칙 수정</button><button className="confirm" onClick={() => setInspectingCalculatedField(null)}>확인</button></footer>
+              </div>
+            </div>
+          );
+        })()}
+      {inspectingCalculatedField &&
+        isArithmeticField(inspectingCalculatedField) &&
         (() => {
           const field = inspectingCalculatedField;
           const resultSheet =
@@ -5722,6 +6293,32 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     ×
                   </button>
                 </header>
+                <section className="calculated-field-color-setting">
+                  <small>표시 색상</small>
+                  <div className="sheet-color-palette" aria-label="fx 컬럼 기본 색상">
+                    {sheetColorPalette.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        className={field.color?.toLowerCase() === color.toLowerCase() ? "selected" : ""}
+                        style={{ background: color }}
+                        aria-label={`${color} fx 컬럼 색상 선택`}
+                        onClick={() => updateCalculatedFieldColor(field.id, color)}
+                      />
+                    ))}
+                    <label title="사용자 지정 색상">
+                      <input
+                        type="color"
+                        aria-label="fx 컬럼 사용자 지정 색상"
+                        value={field.color ?? "#2e7051"}
+                        onChange={(event) =>
+                          updateCalculatedFieldColor(field.id, event.target.value)
+                        }
+                      />
+                      <span>+</span>
+                    </label>
+                  </div>
+                </section>
                 <section>
                   <small>계산식</small>
                   <h2>각 행에 아래 계산을 적용합니다</h2>
@@ -5785,6 +6382,54 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     확인
                   </button>
                 </footer>
+              </div>
+            </div>
+          );
+        })()}
+      {transformDraft &&
+        (() => {
+          const previewField: TransformCalculatedField = {
+            ...transformDraft,
+            id: "transform-preview",
+            kind: "transform",
+          };
+          const preview = activeSheet.rowIds.slice(0, 5).map((rowId, index) => ({
+            rowId,
+            before: activeSheet.rows[index]?.[activeSheet.columns.indexOf(transformDraft.sourceColumn)] ?? "",
+            after: calculateTransformField(previewField, sheets, rowId),
+          }));
+          const updateStep = (id: string, next: TransformStep) => setTransformDraft((current) => current && ({ ...current, steps: current.steps.map((step) => step.id === id ? next : step) }));
+          return (
+            <div className="relation-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCalculatedFieldEditor(); }}>
+              <div className="relation-modal calculation-modal transform-modal" role="dialog" aria-modal="true" aria-label="값 정제 필드 설정">
+                <header><div><span className="fx-badge">⇥</span><strong>{editingCalculatedFieldId ? "값 정제 필드 수정" : "값 정제 필드 만들기"}</strong></div><button aria-label="값 정제 설정 닫기" onClick={closeCalculatedFieldEditor}>×</button></header>
+                <div className="calculation-modal-body">
+                  <section>
+                    <small>1 · 원본 값</small><h2>현재 시트에서 복사할 필드를 고르세요</h2>
+                    <label>원본 필드<select value={transformDraft.sourceColumn} onChange={(event) => setTransformDraft((current) => current && ({ ...current, sourceColumn: event.target.value }))}>{activeSheet.columns.map((column) => <option key={column}>{column}</option>)}</select></label>
+                  </section>
+                  <section>
+                    <small>2 · 적용 조건 (선택)</small>
+                    <label className="transform-condition-toggle"><input type="checkbox" checked={transformDraft.condition.enabled} onChange={(event) => setTransformDraft((current) => current && ({ ...current, condition: { ...current.condition, enabled: event.target.checked } }))} /> 조건에 맞는 행만 정제</label>
+                    {transformDraft.condition.enabled && <div className="transform-condition-row">
+                      <select aria-label="조건 필드" value={transformDraft.condition.column} onChange={(event) => setTransformDraft((current) => current && ({ ...current, condition: { ...current.condition, column: event.target.value } }))}>{activeSheet.columns.map((column) => <option key={column}>{column}</option>)}</select>
+                      <select aria-label="조건 연산자" value={transformDraft.condition.operator} onChange={(event) => setTransformDraft((current) => current && ({ ...current, condition: { ...current.condition, operator: event.target.value as TransformCalculatedField["condition"]["operator"] } }))}><option value="eq">같음</option><option value="contains">포함</option><option value="startsWith">시작함</option><option value="endsWith">끝남</option></select>
+                      <input aria-label="조건 값" value={transformDraft.condition.value} placeholder="비교할 값" onChange={(event) => setTransformDraft((current) => current && ({ ...current, condition: { ...current.condition, value: event.target.value } }))} />
+                    </div>}
+                  </section>
+                  <section>
+                    <small>3 · 정제 순서</small><h2>위에서 아래 순서로 적용합니다</h2>
+                    <div className="transform-step-list">{transformDraft.steps.map((step, index) => <div className="transform-step" key={step.id}><b>{index + 1}</b><select aria-label={`${index + 1}번째 정제 방식`} value={step.type} onChange={(event) => { const type = event.target.value as TransformStep["type"]; updateStep(step.id, type === "substring" ? { id: step.id, type, start: 1, length: 2 } : type === "takeLeft" || type === "takeRight" ? { id: step.id, type, length: 6 } : { id: step.id, type }); }}><option value="trim">앞뒤 공백 제거</option><option value="digitsOnly">숫자만 남기기</option><option value="takeLeft">앞에서 N자리</option><option value="takeRight">뒤에서 N자리</option><option value="substring">중간 N자리</option></select>
+                      {(step.type === "takeLeft" || step.type === "takeRight") && <input type="number" min="1" max="999" aria-label="가져올 자리 수" value={step.length} onChange={(event) => updateStep(step.id, { ...step, length: Math.max(1, Number(event.target.value)) })} />}
+                      {step.type === "substring" && <><input type="number" min="1" max="999" aria-label="시작 위치" value={step.start} onChange={(event) => updateStep(step.id, { ...step, start: Math.max(1, Number(event.target.value)) })} /><input type="number" min="1" max="999" aria-label="가져올 자리 수" value={step.length} onChange={(event) => updateStep(step.id, { ...step, length: Math.max(1, Number(event.target.value)) })} /></>}
+                      <button type="button" aria-label={`${index + 1}번째 정제 단계 삭제`} disabled={transformDraft.steps.length <= 1} onClick={() => setTransformDraft((current) => current && ({ ...current, steps: current.steps.filter((item) => item.id !== step.id) }))}>×</button></div>)}</div>
+                    <button type="button" className="transform-add-step" disabled={transformDraft.steps.length >= 10} onClick={addTransformStep}>+ 정제 단계 추가</button>
+                    {transformDraft.condition.enabled && <label>조건 불일치 시<select value={transformDraft.fallback} onChange={(event) => setTransformDraft((current) => current && ({ ...current, fallback: event.target.value as TransformDraft["fallback"] }))}><option value="empty">빈 값</option><option value="original">원본 값 유지</option></select></label>}
+                  </section>
+                  <section><small>4 · 미리보기 · 최대 5개</small><div className="transform-preview">{preview.map((item) => <div key={item.rowId}><span>{item.before || "빈 값"}</span><b>→</b><strong>{item.after || "빈 값"}</strong></div>)}</div></section>
+                  <section><label>필드 이름<input value={transformDraft.name} onChange={(event) => setTransformDraft((current) => current && ({ ...current, name: event.target.value }))} /></label></section>
+                </div>
+                <footer><button onClick={closeCalculatedFieldEditor}>취소</button><button className="confirm" disabled={!transformDraft.name.trim() || !transformDraft.sourceColumn || transformDraft.steps.length === 0} onClick={saveTransformField}>{editingCalculatedFieldId ? "정제 필드 수정 저장" : "정제 필드 만들기"}</button></footer>
               </div>
             </div>
           );

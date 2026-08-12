@@ -16,6 +16,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
+    "db:seed:lca": "tsx scripts/seed-lca-normalized.ts",
     "db:studio": "prisma studio"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
     "dotenv": "^17.4.2",
     "next": "16.3.0",
     "pg": "^8.23.0",
+    "pg-copy-streams": "^7.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
@@ -31,6 +33,7 @@
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/pg": "^8.21.0",
+    "@types/pg-copy-streams": "^1.2.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
