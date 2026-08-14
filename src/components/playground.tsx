@@ -2,6 +2,13 @@
 
 import { validateSheetValue } from "@/lib/sheet-value-validation";
 import { upsertSheetRelation } from "@/lib/sheet-relations";
+import { selectFormulaForValue } from "@/lib/conditional-calculation";
+import {
+  filterSheetRowIndexes,
+  findShortestRelationPath,
+  type ActiveSheetFilter,
+  type FilterTarget,
+} from "@/lib/sheet-filtering";
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -10,6 +17,7 @@ import { Icons } from "@/components/icons";
 type ComponentKind =
   | "input"
   | "radio"
+  | "slicer"
   | "search"
   | "button"
   | "table"
@@ -93,6 +101,46 @@ type DisplayBinding = {
   rowId: string;
 };
 type DisplayBindings = Record<string, DisplayBinding>;
+type FilterBinding = {
+  sourceSheetId: string;
+  sourceColumn: string;
+  mode?: "filter" | "variable";
+  targets?: FilterTarget[];
+  targetComponentIds?: string[];
+  includeAllOption: boolean;
+};
+type FilterBindings = Record<string, FilterBinding>;
+type FilterSelections = Record<string, string>;
+
+function migrateFilterBindings(
+  bindings: FilterBindings,
+  displayBindings: DisplayBindings,
+  relations: SheetRelation[],
+): FilterBindings {
+  return Object.fromEntries(
+    Object.entries(bindings).map(([filterId, binding]) => [
+      filterId,
+      {
+        ...binding,
+        targets:
+          binding.targets ??
+          (binding.targetComponentIds ?? []).flatMap((componentId) => {
+            const targetSheetId = displayBindings[componentId]?.sheetId;
+            if (!targetSheetId) return [];
+            const relationPath = findShortestRelationPath(
+              binding.sourceSheetId,
+              targetSheetId,
+              relations,
+            );
+            return relationPath === null
+              ? []
+              : [{ componentId, sheetId: targetSheetId, relationPath }];
+          }),
+        targetComponentIds: undefined,
+      },
+    ]),
+  );
+}
 type RelationType = "1:1" | "1:N" | "N:1" | "N:N";
 
 function RelationCardIcon({ type }: { type: RelationType }) {
@@ -160,6 +208,8 @@ type FormulaToken =
       column: string;
       relationPath?: string[];
     }
+  | { kind: "selection"; componentId: string }
+  | { kind: "literal"; value: string }
   | { kind: "operator"; operator: CalculationOperator };
 type ArithmeticCalculatedField = {
   id: string;
@@ -169,6 +219,10 @@ type ArithmeticCalculatedField = {
   resultSheetId: string;
   relationIds: string[];
   formula: FormulaToken[];
+  condition?: {
+    column: string;
+    cases: { id: string; value: string; formula: FormulaToken[] }[];
+  };
 };
 type ConditionalOperator =
   | "eq"
@@ -228,6 +282,7 @@ type CalculationDraft = {
   relationIds: string[];
   formula: FormulaToken[];
   name: string;
+  condition?: ArithmeticCalculatedField["condition"];
 };
 type ConditionalSumDraft = Omit<ConditionalSumField, "id" | "kind">;
 type TransformDraft = Omit<TransformCalculatedField, "id" | "kind">;
@@ -250,6 +305,7 @@ type ProjectSnapshot = {
   sheetFolders: SheetFolder[];
   dataBinding: DataBindingConfig;
   displayBindings: DisplayBindings;
+  filterBindings?: FilterBindings;
   sheetRelations: SheetRelation[];
   calculatedFields: CalculatedField[];
 };
@@ -316,6 +372,12 @@ const groups: {
         name: "라디오 선택",
         caption: "하나의 항목을 선택해요",
         glyph: "◉",
+      },
+      {
+        kind: "slicer",
+        name: "선택 필터",
+        caption: "선택한 값으로 표를 필터링해요",
+        glyph: "▽",
       },
       {
         kind: "search",
@@ -527,7 +589,7 @@ function defaultItemWidth(kind: ComponentKind) {
   if (kind === "button") return 150;
   if (kind === "search") return 700;
   if (kind === "pagination") return 250;
-  if (kind === "input" || kind === "radio" || kind === "condition") return 360;
+  if (kind === "input" || kind === "radio" || kind === "slicer" || kind === "condition") return 360;
   return 928;
 }
 
@@ -1034,6 +1096,7 @@ function calculateFieldValue(
   sheets: Sheet[],
   resultRowId: string,
   calculatedFields: CalculatedField[] = [],
+  selectionValues: FilterSelections = {},
   resolvingFieldIds: Set<string> = new Set(),
 ): string {
   if (resolvingFieldIds.has(field.id)) return "순환 참조";
@@ -1043,6 +1106,19 @@ function calculateFieldValue(
   if (isTransformField(field))
     return calculateTransformField(field, sheets, resultRowId);
   const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
+  const resultRowIndex = resultSheet?.rowIds.indexOf(resultRowId) ?? -1;
+  const conditionColumnIndex = field.condition
+    ? (resultSheet?.columns.indexOf(field.condition.column) ?? -1)
+    : -1;
+  const conditionValue =
+    conditionColumnIndex >= 0
+      ? (resultSheet?.rows[resultRowIndex]?.[conditionColumnIndex] ?? "")
+      : "";
+  const formula = selectFormulaForValue(
+    field.formula,
+    field.condition?.cases,
+    conditionValue,
+  );
   const values: number[] = [];
   const operators: CalculationOperator[] = [];
   const precedence = (operator: CalculationOperator) =>
@@ -1064,7 +1140,7 @@ function calculateFieldValue(
     );
     return true;
   };
-  for (const token of field.formula) {
+  for (const token of formula) {
     if (token.kind === "operator") {
       while (
         operators.length &&
@@ -1073,6 +1149,16 @@ function calculateFieldValue(
         if (!applyTop()) return "계산 불가";
       }
       operators.push(token.operator);
+      continue;
+    }
+    if (token.kind === "literal" || token.kind === "selection") {
+      const rawValue =
+        token.kind === "literal"
+          ? token.value
+          : (selectionValues[token.componentId] ?? "");
+      const number = parseNumericValue(rawValue);
+      if (number === null) return "숫자 필요";
+      values.push(number);
       continue;
     }
     const sheet =
@@ -1132,6 +1218,7 @@ function calculateFieldValue(
           sheets,
           currentRowId,
           calculatedFields,
+          selectionValues,
           nextResolvingFieldIds,
         )
       : (sheet?.rows[rowIndex]?.[sheet.columns.indexOf(token.column)] ?? "");
@@ -1154,12 +1241,22 @@ function RenderItem({
   sheetRelations,
   calculatedFields,
   binding,
+  filterBinding,
+  filterSelection,
+  activeFilters,
+  onFilterChange,
+  selectionValues,
 }: {
   item: CanvasItem;
   sheets: Sheet[];
   sheetRelations: SheetRelation[];
   calculatedFields: CalculatedField[];
   binding?: DisplayBinding;
+  filterBinding?: FilterBinding;
+  filterSelection?: string;
+  activeFilters: ActiveSheetFilter[];
+  onFilterChange: (value: string) => void;
+  selectionValues: FilterSelections;
 }) {
   const sheet = sheets.find((candidate) => candidate.id === binding?.sheetId);
   const rowIndex = sheet?.rowIds.indexOf(binding?.rowId ?? "") ?? -1;
@@ -1210,6 +1307,45 @@ function RenderItem({
         </label>
       </fieldset>
     );
+  if (item.kind === "slicer") {
+    const sourceSheet = sheets.find(
+      (candidate) => candidate.id === filterBinding?.sourceSheetId,
+    );
+    const sourceColumnIndex =
+      sourceSheet?.columns.indexOf(filterBinding?.sourceColumn ?? "") ?? -1;
+    const options =
+      sourceSheet && sourceColumnIndex >= 0
+        ? [
+            ...new Set(
+              sourceSheet.rows
+                .map((sourceRow) => sourceRow[sourceColumnIndex])
+                .filter(Boolean),
+            ),
+          ]
+        : [];
+    return (
+      <label className="mock-slicer">
+        <span>{item.label}</span>
+        <select
+          aria-label={`${item.label} 값 선택`}
+          value={filterSelection ?? ""}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => onFilterChange(event.target.value)}
+        >
+          {filterBinding?.includeAllOption !== false ? (
+            <option value="">전체</option>
+          ) : (
+            <option value="" disabled>값을 선택하세요</option>
+          )}
+          {options.map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+        {!sourceSheet && <small>데이터 탭에서 시트를 연결하세요</small>}
+      </label>
+    );
+  }
   if (item.kind === "condition")
     return (
       <div className="mock-condition">
@@ -1239,6 +1375,11 @@ function RenderItem({
         sheet?.columns.includes(field) ||
         sheetCalculatedFields.some((calculated) => calculated.name === field),
     ) ?? [];
+  const visibleRows = sheet
+    ? filterSheetRowIndexes(sheet, activeFilters, sheetRelations, sheets).map(
+        (index) => ({ sheetRow: sheet.rows[index], index }),
+      )
+    : [];
   if (sheet && tableFields.length > 0)
     return (
       <div className="mock-table-wrap">
@@ -1259,7 +1400,7 @@ function RenderItem({
             </tr>
           </thead>
           <tbody>
-            {sheet.rows.map((sheetRow, index) => (
+            {visibleRows.map(({ sheetRow, index }) => (
               <tr key={sheet.rowIds[index] ?? index}>
                 {tableFields.map((field) => {
                   const calculated = sheetCalculatedFields.find(
@@ -1274,6 +1415,7 @@ function RenderItem({
                             sheets,
                             sheet.rowIds[index],
                             calculatedFields,
+                            selectionValues,
                           )
                         : sheetRow[sheet.columns.indexOf(field)]}
                     </td>
@@ -1281,6 +1423,13 @@ function RenderItem({
                 })}
               </tr>
             ))}
+            {visibleRows.length === 0 && (
+              <tr>
+                <td className="mock-table-empty" colSpan={tableFields.length}>
+                  선택한 조건에 해당하는 데이터가 없습니다.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -1467,6 +1616,169 @@ function ComponentDataPanel({
       <button className="remove-binding" disabled={!binding} onClick={onRemove}>
         연결 해제
       </button>
+    </div>
+  );
+}
+
+function SlicerDataPanel({
+  items,
+  sheets,
+  displayBindings,
+  sheetRelations,
+  binding,
+  onChange,
+}: {
+  items: CanvasItem[];
+  sheets: Sheet[];
+  displayBindings: DisplayBindings;
+  sheetRelations: SheetRelation[];
+  binding?: FilterBinding;
+  onChange: (binding: FilterBinding) => void;
+}) {
+  if (sheets.length === 0)
+    return (
+      <div className="empty-data-binding">
+        <Icons.database />
+        <strong>연결할 데이터 시트가 없습니다</strong>
+        <p>아래 데이터 영역에서 새 시트를 만들어주세요.</p>
+      </div>
+    );
+  const sourceSheet =
+    sheets.find((sheet) => sheet.id === binding?.sourceSheetId) ?? sheets[0];
+  const migratedTargets =
+    binding?.targets ??
+    (binding?.targetComponentIds ?? []).flatMap((componentId) => {
+      const targetSheetId = displayBindings[componentId]?.sheetId;
+      if (!targetSheetId) return [];
+      const relationPath = findShortestRelationPath(
+        sourceSheet.id,
+        targetSheetId,
+        sheetRelations,
+      );
+      return relationPath === null
+        ? []
+        : [{ componentId, sheetId: targetSheetId, relationPath }];
+    });
+  const normalized: FilterBinding & { targets: FilterTarget[] } = {
+    sourceSheetId: sourceSheet.id,
+    sourceColumn: binding?.sourceColumn ?? sourceSheet.columns[0] ?? "",
+    mode: binding?.mode ?? "filter",
+    targets: migratedTargets,
+    includeAllOption: binding?.includeAllOption ?? true,
+  };
+  const compatibleTables = items.flatMap((candidate) => {
+    if (candidate.kind !== "table") return [];
+    const targetSheetId = displayBindings[candidate.id]?.sheetId;
+    if (!targetSheetId) return [];
+    const relationPath = findShortestRelationPath(
+      sourceSheet.id,
+      targetSheetId,
+      sheetRelations,
+    );
+    return relationPath === null
+      ? []
+      : [{ table: candidate, targetSheetId, relationPath }];
+  });
+  const update = (patch: Partial<FilterBinding>) =>
+    onChange({ ...normalized, ...patch });
+  return (
+    <div className="component-data-panel slicer-data-panel">
+      <section>
+        <div className="data-source-title">
+          <div>
+            <Icons.database />
+            <span><strong>선택값 가져오기</strong><small>컬럼의 고유값을 선택지로 사용합니다.</small></span>
+          </div>
+          {binding && <em>연결됨</em>}
+        </div>
+        <label>
+          선택값 사용 방식
+          <select
+            value={normalized.mode}
+            onChange={(event) =>
+              onChange({
+                ...normalized,
+                mode: event.target.value as "filter" | "variable",
+                targets:
+                  event.target.value === "filter" ? normalized.targets : [],
+              })
+            }
+          >
+            <option value="filter">테이블 필터</option>
+            <option value="variable">계산 변수</option>
+          </select>
+        </label>
+        <label>
+          가져올 시트
+          <select value={sourceSheet.id} onChange={(event) => {
+            const nextSheet =
+              sheets.find((sheet) => sheet.id === event.target.value) ?? sheets[0];
+            onChange({
+              sourceSheetId: nextSheet.id,
+              sourceColumn: nextSheet.columns[0] ?? "",
+              targets: [],
+              includeAllOption: normalized.includeAllOption,
+            });
+          }}>
+            {sheets.map((sheet) => <option key={sheet.id} value={sheet.id}>{sheet.name}</option>)}
+          </select>
+        </label>
+        <label>
+          선택값 컬럼
+          <select value={normalized.sourceColumn} onChange={(event) => update({ sourceColumn: event.target.value })}>
+            {sourceSheet.columns.map((column) => <option key={column}>{column}</option>)}
+          </select>
+        </label>
+        <label className="slicer-all-option">
+          <input type="checkbox" checked={normalized.includeAllOption} onChange={(event) => update({ includeAllOption: event.target.checked })} />
+          전체 옵션 표시
+        </label>
+      </section>
+      {normalized.mode === "filter" && <section>
+        <h3>영향받는 테이블</h3>
+        {compatibleTables.length > 0 ? (
+          <div className="display-field-list">
+            {compatibleTables.map(({ table, targetSheetId, relationPath }) => {
+              const checked = normalized.targets.some(
+                (target) => target.componentId === table.id,
+              );
+              return (
+                <label key={table.id} className={checked ? "active" : ""}>
+                  <input type="checkbox" checked={checked} onChange={() => update({
+                    targets: checked
+                      ? normalized.targets.filter(
+                          (target) => target.componentId !== table.id,
+                        )
+                      : [
+                          ...normalized.targets,
+                          {
+                            componentId: table.id,
+                            sheetId: targetSheetId,
+                            relationPath,
+                          },
+                        ],
+                  })} />
+                  <span>
+                    {table.label}
+                    <small>
+                      {relationPath.length === 0
+                        ? "같은 시트"
+                        : relationPathLabel(
+                            sourceSheet,
+                            relationPath,
+                            sheetRelations,
+                            sheets,
+                          )}
+                    </small>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="slicer-empty-target">연결 가능한 테이블이 없습니다.</p>
+        )}
+      </section>}
     </div>
   );
 }
@@ -2175,6 +2487,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   );
   const [calculationDraft, setCalculationDraft] =
     useState<CalculationDraft | null>(null);
+  const [editingConditionCaseId, setEditingConditionCaseId] = useState<
+    string | null
+  >(null);
   const [conditionalSumDraft, setConditionalSumDraft] =
     useState<ConditionalSumDraft | null>(null);
   const [transformDraft, setTransformDraft] =
@@ -2205,6 +2520,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       rowId: "",
     },
   });
+  const [filterBindings, setFilterBindings] = useState<FilterBindings>({});
+  const [filterSelections, setFilterSelections] = useState<FilterSelections>({});
   const [hydrated, setHydrated] = useState(isTemporary);
   const skipInitialSaveRef = useRef(true);
   const [saveStatus, setSaveStatus] = useState(isTemporary ? "저장되지 않는 임시 캔버스" : "데이터베이스 연결 중");
@@ -2238,7 +2555,6 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [sheetSearchOpen, setSheetSearchOpen] = useState(false);
   const [sheetSearchQuery, setSheetSearchQuery] = useState("");
   const normalSheetDockHeightRef = useRef(235);
-  const nextId = useRef(1);
   const panRef = useRef<{
     startX: number;
     startY: number;
@@ -2249,6 +2565,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const movedItemRef = useRef(false);
   const activePage = pages.find((page) => page.id === activePageId) ?? pages[0];
   const items = activePage.items;
+  const selectionVariables = items.flatMap((item) => {
+    const binding = filterBindings[item.id];
+    return item.kind === "slicer" && binding?.mode === "variable"
+      ? [{ item, binding }]
+      : [];
+  });
   const selected = items.find((item) => item.id === selectedId) ?? items[0];
   const activeSheet =
     sheets.find((sheet) => sheet.id === activeSheetId) ??
@@ -2289,7 +2611,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       relationPath.includes(relation.id),
     ),
   );
-  const canCreateCalculation = calculableSheetPaths.length > 0;
+  const canCreateCalculation =
+    calculableSheetPaths.length > 0 || selectionVariables.length > 0;
   const conditionalSheetPaths = aggregateReachableSheetsFrom(
     activeSheet,
     sheetRelations,
@@ -2378,6 +2701,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setSheetFolders(snapshot.sheetFolders ?? []);
     setDataBinding(snapshot.dataBinding);
     setDisplayBindings(snapshot.displayBindings);
+    setFilterBindings(
+      migrateFilterBindings(
+        snapshot.filterBindings ?? {},
+        snapshot.displayBindings,
+        snapshot.sheetRelations,
+      ),
+    );
+    setFilterSelections({});
     setSheetRelations(snapshot.sheetRelations);
     setCalculatedFields(snapshot.calculatedFields);
   }
@@ -2402,7 +2733,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   function currentProjectDocument() {
     return {
-      schemaVersion: 9,
+      schemaVersion: 13,
       pages,
       activePageId,
       canvasView,
@@ -2410,6 +2741,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       sheetFolders,
       dataBinding,
       displayBindings,
+      filterBindings,
       sheetRelations,
       calculatedFields,
     };
@@ -2623,6 +2955,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               sheetFolders?: SheetFolder[];
               dataBinding?: DataBindingConfig;
               displayBindings?: DisplayBindings;
+              filterBindings?: FilterBindings;
               sheetRelations?: SheetRelation[];
               calculatedFields?: CalculatedField[];
             };
@@ -2654,6 +2987,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           setDataBinding(document.dataBinding);
         if (hasCurrentDataModel && document?.displayBindings)
           setDisplayBindings(document.displayBindings);
+        if (hasCurrentDataModel && document?.filterBindings)
+          setFilterBindings(
+            migrateFilterBindings(
+              document.filterBindings,
+              document.displayBindings ?? {},
+              document.sheetRelations ?? [],
+            ),
+          );
         if (hasCurrentDataModel && Array.isArray(document?.sheetRelations))
           setSheetRelations(
             document.sheetRelations.map((relation) => ({
@@ -2809,6 +3150,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       sheetFolders,
       dataBinding,
       displayBindings,
+      filterBindings,
       sheetRelations,
       calculatedFields,
     };
@@ -2829,6 +3171,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     canvasView,
     dataBinding,
     displayBindings,
+    filterBindings,
     hydrated,
     pages,
     sheetRelations,
@@ -2875,7 +3218,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           document: {
-            schemaVersion: 9,
+            schemaVersion: 13,
             pages,
             activePageId,
             canvasView,
@@ -2883,6 +3226,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             sheetFolders,
             dataBinding,
             displayBindings,
+            filterBindings,
             sheetRelations,
             calculatedFields,
           },
@@ -2901,6 +3245,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     canvasView,
     dataBinding,
     displayBindings,
+    filterBindings,
     hydrated,
     pages,
     projectId,
@@ -2911,9 +3256,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   useEffect(() => {
     function handleDeleteKey(event: KeyboardEvent) {
-      if (event.key !== "Backspace" || !selectedId) return;
+      if (
+        (event.key !== "Backspace" && event.key !== "Delete") ||
+        !selectedId
+      )
+        return;
       const target = event.target as HTMLElement | null;
-      if (target?.closest("input, textarea, select, [contenteditable='true']"))
+      if (target?.closest("input, textarea, [contenteditable='true']"))
         return;
       event.preventDefault();
       setPages((current) =>
@@ -2927,6 +3276,31 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         ),
       );
       setDisplayBindings((current) => {
+        const next = { ...current };
+        delete next[selectedId];
+        return next;
+      });
+      setFilterBindings((current) => {
+        const next = { ...current };
+        delete next[selectedId];
+        for (const [filterId, binding] of Object.entries(next))
+          if (
+            (binding.targets ?? []).some(
+              (target) => target.componentId === selectedId,
+            ) || binding.targetComponentIds?.includes(selectedId)
+          )
+            next[filterId] = {
+              ...binding,
+              targets: (binding.targets ?? []).filter(
+                (target) => target.componentId !== selectedId,
+              ),
+              targetComponentIds: binding.targetComponentIds?.filter(
+                (componentId) => componentId !== selectedId,
+              ),
+            };
+        return next;
+      });
+      setFilterSelections((current) => {
         const next = { ...current };
         delete next[selectedId];
         return next;
@@ -2989,7 +3363,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       );
     }, 0);
     const next = {
-      id: `${kind}-${nextId.current++}`,
+      id: `${kind}-${crypto.randomUUID()}`,
       kind,
       label: source.name,
       x: 0,
@@ -3590,7 +3964,18 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               token.kind === "field" &&
               token.sheetId === activeSheet.id &&
               token.column === column,
-          );
+          ) &&
+            !(
+              field.condition?.column === column ||
+              field.condition?.cases.some((item) =>
+                item.formula.some(
+                  (token) =>
+                    token.kind === "field" &&
+                    token.sheetId === activeSheet.id &&
+                    token.column === column,
+                ),
+              )
+            );
         },
       ),
     );
@@ -3639,26 +4024,47 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     );
     const firstField = availableFields[0];
     const secondField = availableFields[1] ?? firstField;
-    if (!firstField || !secondField) return;
-    setCalculationDraft({
-      relationIds: calculableRelations.map((item) => item.id),
-      formula: [
-        {
+    const firstVariable = selectionVariables[0];
+    if (!firstField && !firstVariable) return;
+    const firstToken: FormulaToken = firstVariable
+      ? { kind: "selection", componentId: firstVariable.item.id }
+      : {
           kind: "field",
-          sheetId: firstField.sheet.id,
-          column: firstField.column,
-          relationPath: firstField.relationPath,
-        },
-        { kind: "operator", operator: "*" },
-        {
+          sheetId: firstField!.sheet.id,
+          column: firstField!.column,
+          relationPath: firstField!.relationPath,
+        };
+    const secondToken: FormulaToken = secondField
+      ? {
           kind: "field",
           sheetId: secondField.sheet.id,
           column: secondField.column,
           relationPath: secondField.relationPath,
-        },
+        }
+      : { kind: "literal", value: "0" };
+    const baseName = firstVariable
+      ? `${firstVariable.item.label} 계산`
+      : `${firstField!.sheet.name}·${secondField!.sheet.name} 계산`;
+    const usedNames = new Set([
+      ...activeSheet.columns,
+      ...activeCalculatedFields.map((field) => field.name),
+    ]);
+    let name = baseName;
+    let suffix = 2;
+    while (usedNames.has(name)) {
+      name = `${baseName} ${suffix}`;
+      suffix += 1;
+    }
+    setCalculationDraft({
+      relationIds: calculableRelations.map((item) => item.id),
+      formula: [
+        firstToken,
+        { kind: "operator", operator: "*" },
+        secondToken,
       ],
-      name: `${firstField.sheet.name}·${secondField.sheet.name} 계산`,
+      name,
     });
+    setEditingConditionCaseId(null);
     setEditingCalculatedFieldId(null);
   }
 
@@ -3692,13 +4098,16 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       name: field.name,
       relationIds: field.relationIds,
       formula: field.formula,
+      condition: field.condition,
     });
+    setEditingConditionCaseId(null);
   }
 
   function closeCalculatedFieldEditor() {
     setConditionalSumDraft(null);
     setTransformDraft(null);
     setCalculationDraft(null);
+    setEditingConditionCaseId(null);
     setEditingCalculatedFieldId(null);
   }
 
@@ -3711,15 +4120,24 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       if (field.id === nextField.id) return nextField;
       if (!previous || previous.name === nextField.name || !isArithmeticField(field))
         return field;
-      return {
-        ...field,
-        formula: field.formula.map((token) =>
+      const renameFormulaReference = (formula: FormulaToken[]) =>
+        formula.map((token) =>
           token.kind === "field" &&
           token.sheetId === previous.resultSheetId &&
           token.column === previous.name
             ? { ...token, column: nextField.name }
             : token,
-        ),
+        );
+      return {
+        ...field,
+        formula: renameFormulaReference(field.formula),
+        condition: field.condition && {
+          ...field.condition,
+          cases: field.condition.cases.map((item) => ({
+            ...item,
+            formula: renameFormulaReference(item.formula),
+          })),
+        },
       };
     });
   }
@@ -3881,9 +4299,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   }
 
   function appendFormulaOperator(operator: CalculationOperator) {
-    if (!calculationDraft || calculationDraft.formula.at(-1)?.kind !== "field")
+    const currentFormula = calculationDraft
+      ? (calculationDraft.condition?.cases.find(
+          (item) => item.id === editingConditionCaseId,
+        )?.formula ?? calculationDraft.formula)
+      : [];
+    if (!calculationDraft || currentFormula.at(-1)?.kind === "operator")
       return;
-    const lastField = calculationDraft.formula.at(-1);
+    const lastField = currentFormula.at(-1);
     const currentIndex =
       lastField?.kind === "field"
         ? calculableSheetPaths.findIndex(
@@ -3895,61 +4318,74 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const nextColumn = nextReachable
       ? (numericFieldNames(nextReachable.sheet)[0] ?? "")
       : "";
-    if (!nextReachable || !nextColumn) return;
-    setCalculationDraft(
-      (current) =>
-        current && {
-          ...current,
-          formula: [
-            ...current.formula,
-            { kind: "operator", operator },
-            {
-              kind: "field",
-              sheetId: nextReachable.sheet.id,
-              column: nextColumn,
-              relationPath: nextReachable.relationPath,
-            },
-          ],
+    const nextToken: FormulaToken = selectionVariables[0]
+      ? { kind: "selection", componentId: selectionVariables[0].item.id }
+      : nextReachable && nextColumn
+        ? {
+            kind: "field",
+            sheetId: nextReachable.sheet.id,
+            column: nextColumn,
+            relationPath: nextReachable.relationPath,
+          }
+        : { kind: "literal", value: "0" };
+    updateActiveFormula((formula) => [
+      ...formula,
+      { kind: "operator", operator },
+      nextToken,
+    ]);
+  }
+
+  function updateActiveFormula(
+    update: (formula: FormulaToken[]) => FormulaToken[],
+  ) {
+    setCalculationDraft((current) => {
+      if (!current) return current;
+      if (!editingConditionCaseId)
+        return { ...current, formula: update(current.formula) };
+      return {
+        ...current,
+        condition: current.condition && {
+          ...current.condition,
+          cases: current.condition.cases.map((item) =>
+            item.id === editingConditionCaseId
+              ? { ...item, formula: update(item.formula) }
+              : item,
+          ),
         },
-    );
+      };
+    });
   }
 
   function updateFormulaField(index: number, encodedField: string) {
-    const [sheetId, column, relationPath] = JSON.parse(encodedField) as [
-      string,
-      string,
-      string[],
-    ];
-    setCalculationDraft(
-      (current) =>
-        current && {
-          ...current,
-          formula: current.formula.map((token, tokenIndex) =>
-            tokenIndex === index
-              ? { kind: "field", sheetId, column, relationPath }
-              : token,
-          ),
-        },
+    const parsed = JSON.parse(encodedField) as FormulaToken;
+    const nextToken: FormulaToken =
+      parsed.kind === "literal" ? { kind: "literal", value: "0" } : parsed;
+    updateActiveFormula((formula) =>
+      formula.map((token, tokenIndex) =>
+        tokenIndex === index ? nextToken : token,
+      ),
+    );
+  }
+
+  function updateFormulaLiteral(index: number, value: string) {
+    updateActiveFormula((formula) =>
+      formula.map((token, tokenIndex) =>
+        tokenIndex === index ? { kind: "literal", value } : token,
+      ),
     );
   }
 
   function updateFormulaOperator(index: number, operator: CalculationOperator) {
-    setCalculationDraft(
-      (current) =>
-        current && {
-          ...current,
-          formula: current.formula.map((token, tokenIndex) =>
-            tokenIndex === index ? { kind: "operator", operator } : token,
-          ),
-        },
+    updateActiveFormula((formula) =>
+      formula.map((token, tokenIndex) =>
+        tokenIndex === index ? { kind: "operator", operator } : token,
+      ),
     );
   }
 
   function removeLastFormulaTerm() {
-    setCalculationDraft((current) =>
-      current && current.formula.length > 1
-        ? { ...current, formula: current.formula.slice(0, -2) }
-        : current,
+    updateActiveFormula((formula) =>
+      formula.length > 1 ? formula.slice(0, -2) : formula,
     );
   }
 
@@ -3970,6 +4406,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         resultSheetId: activeSheet.id,
         relationIds: calculationDraft.relationIds,
         formula: calculationDraft.formula,
+        condition: calculationDraft.condition,
       };
       return editingCalculatedFieldId
         ? replaceCalculatedField(current, nextField)
@@ -3984,11 +4421,16 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const dependents = calculatedFields.filter(
       (candidate) =>
         isArithmeticField(candidate) &&
-        candidate.formula.some(
-          (token) =>
-            token.kind === "field" &&
-            token.sheetId === field.resultSheetId &&
-            token.column === field.name,
+        [
+          candidate.formula,
+          ...(candidate.condition?.cases.map((item) => item.formula) ?? []),
+        ].some((formula) =>
+          formula.some(
+            (token) =>
+              token.kind === "field" &&
+              token.sheetId === field.resultSheetId &&
+              token.column === field.name,
+          ),
         ),
     );
     if (dependents.length > 0) {
@@ -4713,6 +5155,24 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                 sheetRelations={sheetRelations}
                                 calculatedFields={calculatedFields}
                                 binding={displayBindings[item.id]}
+                                filterBinding={filterBindings[item.id]}
+                                filterSelection={filterSelections[item.id]}
+                                activeFilters={Object.entries(filterBindings)
+                                  .flatMap(([filterId, candidate]) => {
+                                    const target = (candidate.targets ?? []).find(
+                                      (entry) => entry.componentId === item.id,
+                                    );
+                                    return target
+                                      ? [{
+                                          sourceSheetId: candidate.sourceSheetId,
+                                          sourceColumn: candidate.sourceColumn,
+                                          target,
+                                          value: filterSelections[filterId] ?? "",
+                                        }]
+                                      : [];
+                                  })}
+                                onFilterChange={(value) => setFilterSelections((current) => ({ ...current, [item.id]: value }))}
+                                selectionValues={filterSelections}
                               />
                               {selectedId === item.id && propertiesOpen && (
                                 <div
@@ -4828,6 +5288,24 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       </details>
                     )}
                   </>
+                ) : propertyTab === "data" && selected.kind === "slicer" ? (
+                  <SlicerDataPanel
+                    items={items}
+                    sheets={sheets}
+                    displayBindings={displayBindings}
+                    sheetRelations={sheetRelations}
+                    binding={filterBindings[selected.id]}
+                    onChange={(binding) => {
+                      setFilterBindings((current) => ({
+                        ...current,
+                        [selected.id]: binding,
+                      }));
+                      setFilterSelections((current) => ({
+                        ...current,
+                        [selected.id]: "",
+                      }));
+                    }}
+                  />
                 ) : propertyTab === "action" ? (
                   <div className="empty-property">
                     <Icons.bolt />
@@ -5788,6 +6266,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                               sheets,
                               activeSheet.rowIds[rowIndex],
                               calculatedFields,
+                              filterSelections,
                             )}
                           </td>
                         );
@@ -5944,13 +6423,18 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           const visit = (field: CalculatedField) => {
             if (visited.has(field.id)) return;
             visited.add(field.id);
-            if (isArithmeticField(field))
-              field.formula.forEach((token) => {
+            if (isArithmeticField(field)) {
+              const formulas = [
+                field.formula,
+                ...(field.condition?.cases.map((item) => item.formula) ?? []),
+              ];
+              formulas.flat().forEach((token) => {
                 if (token.kind !== "field" || token.sheetId !== activeSheet.id)
                   return;
                 const dependency = fieldsByName.get(token.column);
                 if (dependency) visit(dependency);
               });
+            }
             orderedFields.push(field);
           };
           activeCalculatedFields.forEach(visit);
@@ -5959,6 +6443,35 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               relation.sourceSheetId === activeSheet.id ||
               relation.targetSheetId === activeSheet.id,
           );
+          const renderDeveloperFormula = (formula: FormulaToken[]) =>
+            formula.map((token, tokenIndex) =>
+              token.kind === "operator" ? (
+                <span key={tokenIndex}>
+                  {token.operator === "*"
+                    ? "×"
+                    : token.operator === "/"
+                      ? "÷"
+                      : token.operator === "-"
+                        ? "−"
+                        : "+"}
+                </span>
+              ) : token.kind === "field" ? (
+                <b key={tokenIndex}>
+                  {relationPathLabel(
+                    activeSheet,
+                    token.relationPath ?? [],
+                    sheetRelations,
+                    sheets,
+                  )} · {token.column}
+                </b>
+              ) : (
+                <b key={tokenIndex}>
+                  {token.kind === "selection"
+                    ? `선택값 · ${items.find((item) => item.id === token.componentId)?.label ?? "선택 컴포넌트"}`
+                    : token.value}
+                </b>
+              ),
+            );
           return (
             <div
               className="relation-modal-backdrop"
@@ -6025,6 +6538,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                             <td>
                               {isConditionalSumField(field)
                                 ? "조건에 맞는 연결 데이터의 합계"
+                                : isArithmeticField(field) && field.condition
+                                  ? "컬럼 값에 따라 수식을 선택한 계산 결과"
                                 : "다른 필드를 참조한 파생 값"}
                             </td>
                           </tr>
@@ -6079,7 +6594,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                 ? "조건 합계"
                                 : isTransformField(field)
                                   ? "값 정제"
-                                  : "파생 계산"}
+                                  : field.condition
+                                    ? "조건 계산"
+                                    : "파생 계산"}
                             </em>
                           </div>
                           {isConditionalSumField(field) ? (
@@ -6117,29 +6634,29 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                               ))}
                             </div>
                           ) : (
-                            <div className="developer-spec-formula formula-inline">
-                              {field.formula.map((token, tokenIndex) =>
-                                token.kind === "operator" ? (
-                                  <span key={tokenIndex}>
-                                    {token.operator === "*"
-                                      ? "×"
-                                      : token.operator === "/"
-                                        ? "÷"
-                                        : token.operator === "-"
-                                          ? "−"
-                                          : "+"}
-                                  </span>
-                                ) : (
-                                  <b key={tokenIndex}>
-                                    {relationPathLabel(
-                                      activeSheet,
-                                      token.relationPath ?? [],
-                                      sheetRelations,
-                                      sheets,
-                                    )} · {token.column}
-                                  </b>
-                                ),
+                            <div className="developer-spec-calculation">
+                              {field.condition && (
+                                <div className="developer-spec-branches">
+                                  {field.condition.cases.map((item) => (
+                                    <div key={item.id}>
+                                      <p>
+                                        <span>{field.condition!.column}</span>
+                                        <strong>=</strong>
+                                        <em>{item.value || "빈 값"}</em>
+                                      </p>
+                                      <div className="developer-spec-formula formula-inline">
+                                        {renderDeveloperFormula(item.formula)}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
                               )}
+                              <div className="developer-spec-default-formula">
+                                {field.condition && <small>그 외 기본 수식</small>}
+                                <div className="developer-spec-formula formula-inline">
+                                  {renderDeveloperFormula(field.formula)}
+                                </div>
+                              </div>
                             </div>
                           )}
                           <div className="developer-spec-samples">
@@ -6153,6 +6670,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                     sheets,
                                     rowId,
                                     calculatedFields,
+                                    filterSelections,
                                   )}
                                 </strong>
                               </span>
@@ -6472,8 +6990,51 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               sheets,
               rowId,
               calculatedFields,
+              filterSelections,
             ),
           }));
+          const renderFormula = (formula: FormulaToken[]) =>
+            formula.map((token, index) => {
+              if (token.kind === "operator")
+                return (
+                  <span key={index}>
+                    {token.operator === "*"
+                      ? "×"
+                      : token.operator === "/"
+                        ? "÷"
+                        : token.operator === "-"
+                          ? "−"
+                          : "+"}
+                  </span>
+                );
+              if (token.kind !== "field")
+                return (
+                  <b key={index}>
+                    {token.kind === "selection"
+                      ? `선택값 · ${items.find((item) => item.id === token.componentId)?.label ?? "선택 컴포넌트"}`
+                      : token.value}
+                  </b>
+                );
+              const referencedSheet =
+                sheets.find((sheet) => sheet.id === token.sheetId) ?? emptySheet;
+              const derived = calculatedFields.some(
+                (candidate) =>
+                  candidate.resultSheetId === token.sheetId &&
+                  candidate.name === token.column,
+              );
+              return (
+                <b key={index}>
+                  {relationPathLabel(
+                    resultSheet,
+                    token.relationPath ?? [],
+                    sheetRelations,
+                    sheets,
+                  ) || referencedSheet.name}{" "}
+                  · {token.column}
+                  {derived && <em>계산 결과</em>}
+                </b>
+              );
+            });
           return (
             <div
               className="relation-modal-backdrop"
@@ -6526,44 +7087,32 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     </label>
                   </div>
                 </section>
+                {field.condition && (
+                  <section>
+                    <small>조건 분기</small>
+                    <h2>{field.condition.column} 값에 따라 수식을 선택합니다</h2>
+                    <div className="calculation-detail-conditions">
+                      {field.condition.cases.map((item) => (
+                        <article key={item.id}>
+                          <div className="calculation-detail-condition-value">
+                            <span>{field.condition!.column}</span>
+                            <strong>=</strong>
+                            <em>{item.value || "빈 값"}</em>
+                          </div>
+                          <div className="calculation-sentence calculation-detail-formula">
+                            {renderFormula(item.formula)}
+                          </div>
+                        </article>
+                      ))}
+                      <p>일치하는 값이 없으면 기본 수식을 사용합니다.</p>
+                    </div>
+                  </section>
+                )}
                 <section>
                   <small>계산식</small>
-                  <h2>각 행에 아래 계산을 적용합니다</h2>
+                  <h2>{field.condition ? "그 외 기본 수식" : "각 행에 아래 계산을 적용합니다"}</h2>
                   <div className="calculation-sentence calculation-detail-formula">
-                    {field.formula.map((token, index) => {
-                      if (token.kind === "operator")
-                        return (
-                          <span key={index}>
-                            {token.operator === "*"
-                              ? "×"
-                              : token.operator === "/"
-                                ? "÷"
-                                : token.operator === "-"
-                                  ? "−"
-                                  : "+"}
-                          </span>
-                        );
-                      const referencedSheet =
-                        sheets.find((sheet) => sheet.id === token.sheetId) ??
-                        emptySheet;
-                      const derived = calculatedFields.some(
-                        (candidate) =>
-                          candidate.resultSheetId === token.sheetId &&
-                          candidate.name === token.column,
-                      );
-                      return (
-                        <b key={index}>
-                          {relationPathLabel(
-                            resultSheet,
-                            token.relationPath ?? [],
-                            sheetRelations,
-                            sheets,
-                          ) || referencedSheet.name}{" "}
-                          · {token.column}
-                          {derived && <em>계산 결과</em>}
-                        </b>
-                      );
-                    })}
+                    {renderFormula(field.formula)}
                   </div>
                 </section>
                 <section>
@@ -7052,6 +7601,18 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         })()}
       {calculationDraft &&
         (() => {
+          const activeCalculationFormula =
+            calculationDraft.condition?.cases.find(
+              (item) => item.id === editingConditionCaseId,
+            )?.formula ?? calculationDraft.formula;
+          const calculationName = calculationDraft.name.trim();
+          const calculationNameConflict =
+            activeSheet.columns.includes(calculationName) ||
+            activeCalculatedFields.some(
+              (field) =>
+                field.name === calculationName &&
+                field.id !== editingCalculatedFieldId,
+            );
           const formulaRelations = sheetRelations.filter((item) =>
             calculationDraft.relationIds.includes(item.id),
           );
@@ -7062,6 +7623,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             resultSheetId: activeSheet.id,
             relationIds: calculationDraft.relationIds,
             formula: calculationDraft.formula,
+            condition: calculationDraft.condition,
           };
           const labelColumn = activeSheet.columns[0] ?? "";
           const preview = activeSheet.rowIds
@@ -7078,6 +7640,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 sheets,
                 rowId,
                 [...calculatedFields, sampleField],
+                filterSelections,
               ),
             }));
           return (
@@ -7108,7 +7671,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     ×
                   </button>
                 </header>
-                <section>
+                <section className="calculation-sheets-section">
                   <small>1단계</small>
                   <h2>계산에 사용할 수 있는 시트</h2>
                   <div className="calculation-sheet-list">
@@ -7129,9 +7692,19 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     경로만 포함했습니다.
                   </p>
                 </section>
-                <section>
-                  <small>2단계</small>
+                <section
+                  id="calculation-formula-editor"
+                  className="calculation-formula-section"
+                >
+                  <small>3단계</small>
                   <h2>수식을 만들어주세요</h2>
+                  {calculationDraft.condition && (
+                    <p className="formula-editing-target">
+                      현재 편집: {editingConditionCaseId
+                        ? `조건값 '${calculationDraft.condition.cases.find((item) => item.id === editingConditionCaseId)?.value || "빈 값"}'의 수식`
+                        : "그 외 기본 수식"}
+                    </p>
+                  )}
                   <p className="formula-help">
                     필드를 고르고 연산자를 눌러 항을 계속 추가하세요. 키보드의 +
                     - * / 와 Backspace도 사용할 수 있어요.
@@ -7140,6 +7713,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     className="formula-builder"
                     tabIndex={0}
                     onKeyDown={(event) => {
+                      const target = event.target as HTMLElement;
+                      if (
+                        target.closest(
+                          "input, textarea, select, [contenteditable='true']",
+                        )
+                      )
+                        return;
                       const operator =
                         event.key === "+" ||
                         event.key === "-" ||
@@ -7153,7 +7733,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       }
                       if (
                         event.key === "Backspace" &&
-                        calculationDraft.formula.length > 1
+                        activeCalculationFormula.length > 1
                       ) {
                         event.preventDefault();
                         removeLastFormulaTerm();
@@ -7161,16 +7741,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     }}
                   >
                     <div className="formula-line">
-                      {calculationDraft.formula.map((token, index) =>
-                        token.kind === "field" ? (
+                      {activeCalculationFormula.map((token, index) =>
+                        token.kind !== "operator" ? (
+                          <span className="formula-operand" key={`${index}-operand`}>
                           <select
-                            key={`${index}-field`}
                             aria-label={`${Math.floor(index / 2) + 1}번째 항`}
-                            value={JSON.stringify([
-                              token.sheetId,
-                              token.column,
-                              token.relationPath ?? [],
-                            ])}
+                            value={JSON.stringify(token.kind === "literal"
+                              ? { kind: "literal" }
+                              : token)}
                             onChange={(event) =>
                               updateFormulaField(index, event.target.value)
                             }
@@ -7180,11 +7758,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                 numericFieldNames(sheet).map((column) => (
                                   <option
                                     key={`${sheet.id}:${column}`}
-                                    value={JSON.stringify([
-                                      sheet.id,
+                                    value={JSON.stringify({
+                                      kind: "field",
+                                      sheetId: sheet.id,
                                       column,
                                       relationPath,
-                                    ])}
+                                    })}
                                   >
                                     {relationPathLabel(
                                       activeSheet,
@@ -7203,7 +7782,32 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                   </option>
                                 )),
                             )}
+                            {selectionVariables.map(({ item }) => (
+                              <option
+                                key={`selection:${item.id}`}
+                                value={JSON.stringify({
+                                  kind: "selection",
+                                  componentId: item.id,
+                                })}
+                              >
+                                선택 컴포넌트 · {item.label}
+                              </option>
+                            ))}
+                            <option value={JSON.stringify({ kind: "literal" })}>
+                              직접 입력 숫자
+                            </option>
                           </select>
+                          {token.kind === "literal" && (
+                            <input
+                              type="number"
+                              aria-label={`${Math.floor(index / 2) + 1}번째 직접 입력 숫자`}
+                              value={token.value}
+                              onChange={(event) =>
+                                updateFormulaLiteral(index, event.target.value)
+                              }
+                            />
+                          )}
+                          </span>
                         ) : (
                           <select
                             key={`${index}-operator`}
@@ -7245,7 +7849,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       )}
                       <button
                         className="remove-term"
-                        disabled={calculationDraft.formula.length <= 1}
+                        disabled={activeCalculationFormula.length <= 1}
                         onClick={removeLastFormulaTerm}
                       >
                         마지막 항 삭제
@@ -7253,8 +7857,186 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     </div>
                   </div>
                 </section>
-                <section>
-                  <small>3단계</small>
+                <section className="calculation-condition-section">
+                  <small>2단계</small>
+                  <h2>컬럼 값에 따라 수식을 나눌까요?</h2>
+                  <label className="calculation-condition-toggle">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(calculationDraft.condition)}
+                      onChange={(event) => {
+                        if (!event.target.checked) {
+                          setEditingConditionCaseId(null);
+                          setCalculationDraft((current) =>
+                            current && { ...current, condition: undefined },
+                          );
+                          return;
+                        }
+                        const id = crypto.randomUUID();
+                        setCalculationDraft((current) =>
+                          current && {
+                            ...current,
+                            condition: {
+                              column: activeSheet.columns[0] ?? "",
+                              cases: [
+                                {
+                                  id,
+                                  value: "A",
+                                  formula: current.formula.map((token) => ({ ...token })),
+                                },
+                              ],
+                            },
+                          },
+                        );
+                        setEditingConditionCaseId(id);
+                      }}
+                    />
+                    조건 계산 사용
+                  </label>
+                  {calculationDraft.condition && (
+                    <div className="calculation-condition-builder">
+                      <label>
+                        조건 컬럼
+                        <select
+                          aria-label="조건 컬럼"
+                          value={calculationDraft.condition.column}
+                          onChange={(event) =>
+                            setCalculationDraft((current) =>
+                              current?.condition
+                                ? {
+                                    ...current,
+                                    condition: {
+                                      ...current.condition,
+                                      column: event.target.value,
+                                    },
+                                  }
+                                : current,
+                            )
+                          }
+                        >
+                          {activeSheet.columns.map((column) => (
+                            <option key={column}>{column}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="calculation-condition-cases">
+                        {calculationDraft.condition.cases.map((item, index) => (
+                          <div key={item.id}>
+                            <span>값 {index + 1}</span>
+                            <input
+                              aria-label={`${index + 1}번째 조건값`}
+                              value={item.value}
+                              onChange={(event) =>
+                                setCalculationDraft((current) =>
+                                  current?.condition
+                                    ? {
+                                        ...current,
+                                        condition: {
+                                          ...current.condition,
+                                          cases: current.condition.cases.map((candidate) =>
+                                            candidate.id === item.id
+                                              ? { ...candidate, value: event.target.value }
+                                              : candidate,
+                                          ),
+                                        },
+                                      }
+                                    : current,
+                                )
+                              }
+                            />
+                            <button
+                              className={editingConditionCaseId === item.id ? "active" : ""}
+                              onClick={() => {
+                                setEditingConditionCaseId(item.id);
+                                requestAnimationFrame(() =>
+                                  document
+                                    .getElementById("calculation-formula-editor")
+                                    ?.scrollIntoView({
+                                      behavior: "smooth",
+                                      block: "nearest",
+                                    }),
+                                );
+                              }}
+                            >
+                              이 값의 수식 편집
+                            </button>
+                            <button
+                              aria-label={`${index + 1}번째 조건 삭제`}
+                              onClick={() => {
+                                if (editingConditionCaseId === item.id)
+                                  setEditingConditionCaseId(null);
+                                setCalculationDraft((current) =>
+                                  current?.condition
+                                    ? {
+                                        ...current,
+                                        condition: {
+                                          ...current.condition,
+                                          cases: current.condition.cases.filter(
+                                            (candidate) => candidate.id !== item.id,
+                                          ),
+                                        },
+                                      }
+                                    : current,
+                                );
+                              }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="calculation-condition-actions">
+                        <button
+                          onClick={() => {
+                            const id = crypto.randomUUID();
+                            setCalculationDraft((current) =>
+                              current?.condition
+                                ? {
+                                    ...current,
+                                    condition: {
+                                      ...current.condition,
+                                      cases: [
+                                        ...current.condition.cases,
+                                        {
+                                          id,
+                                          value: "",
+                                          formula: current.formula.map((token) => ({ ...token })),
+                                        },
+                                      ],
+                                    },
+                                  }
+                                : current,
+                            );
+                            setEditingConditionCaseId(id);
+                          }}
+                        >
+                          조건값 추가
+                        </button>
+                        <button
+                          className={!editingConditionCaseId ? "active" : ""}
+                          onClick={() => {
+                            setEditingConditionCaseId(null);
+                            requestAnimationFrame(() =>
+                              document
+                                .getElementById("calculation-formula-editor")
+                                ?.scrollIntoView({
+                                  behavior: "smooth",
+                                  block: "nearest",
+                                }),
+                            );
+                          }}
+                        >
+                          그 외 기본 수식 편집
+                        </button>
+                      </div>
+                      <p className="formula-help">
+                        선택한 분기 또는 기본 수식을 바로 아래 3단계 편집기에서 수정합니다.
+                      </p>
+                    </div>
+                  )}
+                </section>
+                <section className="calculation-result-section">
+                  <small>4단계</small>
                   <h2>결과 필드의 이름을 정해주세요</h2>
                   <label className="relation-target-sheet">
                     필드 이름
@@ -7269,15 +8051,20 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       }
                     />
                   </label>
+                  {calculationNameConflict && (
+                    <small className="calculation-name-error" role="alert">
+                      같은 시트에 이미 ‘{calculationName}’ 필드가 있습니다. 다른 이름을 입력해주세요.
+                    </small>
+                  )}
                   <div className="calculation-sentence">
-                    {calculationDraft.formula.map((token, index) =>
-                      token.kind === "field" ? (
+                    {activeCalculationFormula.map((token, index) =>
+                      token.kind !== "operator" ? (
                         <b key={index}>
-                          {
-                            sheets.find((sheet) => sheet.id === token.sheetId)
-                              ?.name
-                          }{" "}
-                          · {token.column}
+                          {token.kind === "field"
+                            ? `${sheets.find((sheet) => sheet.id === token.sheetId)?.name} · ${token.column}`
+                            : token.kind === "selection"
+                              ? `선택값 · ${items.find((item) => item.id === token.componentId)?.label ?? "선택 컴포넌트"}`
+                              : token.value || "직접 입력 숫자"}
                         </b>
                       ) : (
                         <span key={index}>
@@ -7309,7 +8096,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     className="confirm"
                     disabled={
                       !calculationDraft.name.trim() ||
-                      calculationDraft.formula.length < 3
+                      activeCalculationFormula.length < 3 ||
+                      calculationNameConflict
                     }
                     onClick={saveCalculatedField}
                   >

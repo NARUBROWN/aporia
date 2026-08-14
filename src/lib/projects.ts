@@ -16,7 +16,7 @@ type ProjectDocument = {
 
 export function emptyProjectDocument(description = ""): Prisma.InputJsonValue {
   return {
-    schemaVersion: 8,
+    schemaVersion: 13,
     description,
     pages: [
       {
@@ -38,6 +38,7 @@ export function emptyProjectDocument(description = ""): Prisma.InputJsonValue {
       relationType: "N:1",
     },
     displayBindings: {},
+    filterBindings: {},
     sheetRelations: [],
     calculatedFields: [],
   };
