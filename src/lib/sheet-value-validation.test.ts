@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { validateSheetValue } from "./sheet-value-validation";
+import {
+  normalizeStoredColumnType,
+  validateSheetValue,
+} from "./sheet-value-validation";
+
+test("저장된 DB 타입을 데이터 시트 타입으로 변환한다", () => {
+  assert.equal(normalizeStoredColumnType("NUMERIC(18,4)"), "number");
+  assert.equal(normalizeStoredColumnType("BOOLEAN"), "boolean");
+  assert.equal(normalizeStoredColumnType("TIMESTAMP"), "date");
+  assert.equal(normalizeStoredColumnType("TEXT"), "text");
+});
 
 test("숫자 타입은 유효한 값을 정규화한다", () => {
   assert.deepEqual(validateSheetValue("number", "1,240.5"), {

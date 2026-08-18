@@ -131,14 +131,39 @@ export async function PUT(
     return Response.json({ error: "INVALID_PROJECT_NAME" }, { status: 400 });
   }
   const document = normalized.document as Prisma.InputJsonValue;
-  const project = await prisma.project.update({
-    where: { id },
-    data: {
-      document,
-      version: { increment: 1 },
-      ...(requestedName ? { name: requestedName } : {}),
-    },
-  });
+  const snapshotReason =
+    "snapshotReason" in body && body.snapshotReason === "manual_save"
+      ? "manual_save"
+      : null;
+  const project = snapshotReason
+    ? await prisma.$transaction(async (transaction) => {
+        const updated = await transaction.project.update({
+          where: { id },
+          data: {
+            document,
+            version: { increment: 1 },
+            ...(requestedName ? { name: requestedName } : {}),
+          },
+        });
+        await transaction.projectSnapshot.create({
+          data: {
+            id: crypto.randomUUID(),
+            projectId: id,
+            document,
+            projectVersion: updated.version,
+            reason: snapshotReason,
+          },
+        });
+        return updated;
+      })
+    : await prisma.project.update({
+        where: { id },
+        data: {
+          document,
+          version: { increment: 1 },
+          ...(requestedName ? { name: requestedName } : {}),
+        },
+      });
 
   return Response.json({
     project: {

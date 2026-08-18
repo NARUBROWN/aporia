@@ -2559,26 +2559,26 @@ svg {
   font-size: 10px;
   font-weight: 800;
 }
-.component-glyph.input,
-.component-glyph.radio,
-.component-glyph.slicer {
+.component-glyph.kind-input,
+.component-glyph.kind-radio,
+.component-glyph.kind-slicer {
   background: #eeeafd;
   color: #6859a6;
 }
-.component-glyph.search {
+.component-glyph.kind-search {
   background: #e8f0fb;
   color: #5277a0;
 }
-.component-glyph.table,
-.component-glyph.pagination {
+.component-glyph.kind-table,
+.component-glyph.kind-pagination {
   background: #e2f2ea;
   color: #3c785b;
 }
-.component-glyph.button {
+.component-glyph.kind-button {
   background: #fff0dc;
   color: #aa6728;
 }
-.component-glyph.condition {
+.component-glyph.kind-condition {
   background: #f7e8ee;
   color: #a15371;
 }

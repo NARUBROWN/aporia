@@ -1,6 +1,9 @@
 "use client";
 
-import { validateSheetValue } from "@/lib/sheet-value-validation";
+import {
+  normalizeStoredColumnType,
+  validateSheetValue,
+} from "@/lib/sheet-value-validation";
 import { upsertSheetRelation } from "@/lib/sheet-relations";
 import { selectFormulaForValue } from "@/lib/conditional-calculation";
 import {
@@ -84,12 +87,32 @@ type NormalizedSheetPayload = {
   }>;
 };
 
-function normalizedColumnType(type: string): ColumnType {
-  const value = type.toLowerCase();
-  if (value.includes("date") || value.includes("time")) return "date";
-  if (value.includes("bool")) return "boolean";
-  if (/int|numeric|decimal|real|double|money/.test(value)) return "number";
-  return "text";
+function sheetsFromNormalizedPayload(payload: NormalizedSheetPayload): Sheet[] {
+  return (payload.sheets ?? []).map((sheet) => ({
+    id: sheet.id,
+    name: sheet.name,
+    color: sheet.color ?? undefined,
+    comment: sheet.comment ?? undefined,
+    columns: sheet.columns.map((column) => column.name),
+    columnTypes: sheet.columns.map((column) =>
+      normalizeStoredColumnType(column.dataType),
+    ),
+    columnColors: Object.fromEntries(
+      sheet.columns.flatMap((column) =>
+        column.color ? [[column.name, column.color]] : [],
+      ),
+    ),
+    columnComments: Object.fromEntries(
+      sheet.columns.flatMap((column) =>
+        column.comment ? [[column.name, column.comment]] : [],
+      ),
+    ),
+    rowIds: [],
+    rows: [],
+    normalized: true,
+    rowCount: sheet.rowCount,
+    nextCursor: null,
+  }));
 }
 
 function sheetRowCount(sheet: Sheet) {
@@ -112,6 +135,12 @@ type FilterBinding = {
 };
 type FilterBindings = Record<string, FilterBinding>;
 type FilterSelections = Record<string, string>;
+type PendingNormalizedCellChange = {
+  sheetId: string;
+  rowId: string;
+  columnIndex: number;
+  value: string;
+};
 
 function migrateFilterBindings(
   bindings: FilterBindings,
@@ -314,7 +343,7 @@ type ProjectSnapshot = {
 type SavedProjectSnapshot = {
   id: string;
   projectVersion: number;
-  reason: "manual" | "before_restore";
+  reason: "manual" | "manual_save" | "before_restore";
   createdAt: string;
 };
 type SheetDockMode = "normal" | "minimized" | "maximized";
@@ -2529,6 +2558,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [expandedSheetFolderIds, setExpandedSheetFolderIds] = useState<string[]>([]);
   const [sheetFolderDropTargetId, setSheetFolderDropTargetId] = useState<string | null>(null);
   const normalizedRowsLoadingRef = useRef(new Set<string>());
+  const pendingNormalizedCellChangesRef = useRef(
+    new Map<string, PendingNormalizedCellChange>(),
+  );
+  const normalizedCellSaveTimeoutRef = useRef<number | null>(null);
+  const normalizedCellFlushPromiseRef = useRef<Promise<void>>(
+    Promise.resolve(),
+  );
   const [loadingNormalizedSheetIds, setLoadingNormalizedSheetIds] = useState<
     string[]
   >([]);
@@ -2892,6 +2928,52 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setSavedSnapshots(payload.snapshots ?? []);
   }
 
+  const flushNormalizedCellChanges = useCallback(async () => {
+    if (!projectId) return;
+    if (normalizedCellSaveTimeoutRef.current !== null) {
+      window.clearTimeout(normalizedCellSaveTimeoutRef.current);
+      normalizedCellSaveTimeoutRef.current = null;
+    }
+    const run = async () => {
+      const changes = [...pendingNormalizedCellChangesRef.current.entries()];
+      if (changes.length === 0) return;
+      await Promise.all(
+        changes.map(async ([key, change]) => {
+          const response = await fetch(
+            `/api/projects/${projectId}/sheets/${change.sheetId}/rows`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                rowId: change.rowId,
+                columnIndex: change.columnIndex,
+                value: change.value,
+              }),
+            },
+          );
+          if (!response.ok) throw new Error("시트 셀을 저장하지 못했습니다.");
+          if (pendingNormalizedCellChangesRef.current.get(key)?.value === change.value)
+            pendingNormalizedCellChangesRef.current.delete(key);
+        }),
+      );
+      setSaveStatus("데이터 변경사항 저장됨");
+    };
+    const next = normalizedCellFlushPromiseRef.current.then(run, run);
+    normalizedCellFlushPromiseRef.current = next.catch(() => undefined);
+    return next;
+  }, [projectId]);
+
+  const queueNormalizedCellSave = useCallback(() => {
+    if (normalizedCellSaveTimeoutRef.current !== null)
+      window.clearTimeout(normalizedCellSaveTimeoutRef.current);
+    normalizedCellSaveTimeoutRef.current = window.setTimeout(() => {
+      normalizedCellSaveTimeoutRef.current = null;
+      void flushNormalizedCellChanges().catch(() =>
+        setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요"),
+      );
+    }, 600);
+  }, [flushNormalizedCellChanges]);
+
   async function saveProjectSnapshot() {
     if (!projectId) {
       if (window.confirm("현재 작업을 저장하려면 프로젝트를 만들어야 합니다. 프로젝트 생성 화면으로 이동할까요?"))
@@ -2904,6 +2986,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setSnapshotError("");
     setSaveStatus("프로젝트와 스냅샷 저장 중");
     try {
+      await flushNormalizedCellChanges();
       const response = await fetch(`/api/projects/${projectId}/snapshots`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2930,13 +3013,18 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     setManualSaveLoading(true);
     setSaveStatus("수동 저장 중");
     try {
+      await flushNormalizedCellChanges();
       const response = await fetch(`/api/projects/${projectId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document: currentProjectDocument() }),
+        body: JSON.stringify({
+          document: currentProjectDocument(),
+          snapshotReason: "manual_save",
+        }),
       });
       if (!response.ok) throw new Error("수동 저장에 실패했습니다.");
       commitLatestProjectSnapshot();
+      await loadSavedSnapshots();
       setSaveStatus("수동 저장됨");
     } catch {
       setSaveStatus("수동 저장 실패 · 다시 시도하세요");
@@ -2996,7 +3084,33 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       };
       if (!isProjectSnapshot(payload.project?.document))
         throw new Error("복원할 프로젝트 문서가 올바르지 않습니다.");
-      applyProjectSnapshot(structuredClone(payload.project.document));
+      const normalizedResponse = await fetch(`/api/projects/${projectId}/sheets`, {
+        cache: "no-store",
+      });
+      if (!normalizedResponse.ok)
+        throw new Error("복원된 데이터 시트를 불러오지 못했습니다.");
+      const normalized = (await normalizedResponse.json()) as NormalizedSheetPayload;
+      const normalizedSheets = sheetsFromNormalizedPayload(normalized);
+      const normalizedSheetIds = new Set(
+        normalizedSheets.map((sheet) => sheet.id),
+      );
+      const restoredDocument = structuredClone(payload.project.document);
+      restoredDocument.sheets = [
+        ...restoredDocument.sheets.filter(
+          (sheet) => !sheet.normalized && !normalizedSheetIds.has(sheet.id),
+        ),
+        ...normalizedSheets,
+      ];
+      restoredDocument.sheetRelations = (normalized.relations ?? []).map(
+        (relation) => ({ ...relation, updateOption: "none", links: [] }),
+      );
+      applyProjectSnapshot(restoredDocument);
+      if (!restoredDocument.sheets.some((sheet) => sheet.id === activeSheetId))
+        setActiveSheetId(
+          normalizedSheets.find((sheet) => sheet.name === "COT유틸Total")?.id ??
+            restoredDocument.sheets[0]?.id ??
+            "",
+        );
       commitLatestProjectSnapshot();
       await loadSavedSnapshots();
       setSaveStatus("스냅샷에서 복원됨");
@@ -3138,31 +3252,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             Array.isArray(normalized.sheets) &&
             normalized.sheets.length > 0
           ) {
-            const nextSheets: Sheet[] = normalized.sheets.map((sheet) => ({
-              id: sheet.id,
-              name: sheet.name,
-              color: sheet.color ?? undefined,
-              comment: sheet.comment ?? undefined,
-              columns: sheet.columns.map((column) => column.name),
-              columnTypes: sheet.columns.map((column) =>
-                normalizedColumnType(column.dataType),
-              ),
-              columnColors: Object.fromEntries(
-                sheet.columns.flatMap((column) =>
-                  column.color ? [[column.name, column.color]] : [],
-                ),
-              ),
-              columnComments: Object.fromEntries(
-                sheet.columns.flatMap((column) =>
-                  column.comment ? [[column.name, column.comment]] : [],
-                ),
-              ),
-              rowIds: [],
-              rows: [],
-              normalized: true,
-              rowCount: sheet.rowCount,
-              nextCursor: null,
-            }));
+            const nextSheets = sheetsFromNormalizedPayload(normalized);
             setSheets(nextSheets);
             setActiveSheetId(
               nextSheets.find((sheet) => sheet.name === "COT유틸Total")?.id ??
@@ -3854,6 +3944,16 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             },
       ),
     );
+    if (activeSheet.normalized && projectId) {
+      pendingNormalizedCellChangesRef.current.set(errorKey, {
+        sheetId: activeSheet.id,
+        rowId,
+        columnIndex,
+        value: result.value,
+      });
+      setSaveStatus("데이터 변경사항 저장 중");
+      queueNormalizedCellSave();
+    }
   }
 
   function clearCellValidationError(errorKey: string) {
@@ -5119,9 +5219,11 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     <strong>
                       {snapshot.reason === "before_restore"
                         ? "복원 전 자동 저장"
-                        : index === 0
-                          ? "최신 스냅샷"
-                          : "프로젝트 저장"}
+                        : snapshot.reason === "manual_save"
+                          ? "수동 저장 기록"
+                          : index === 0
+                            ? "최신 스냅샷"
+                            : "프로젝트 저장"}
                     </strong>
                     <time dateTime={snapshot.createdAt}>
                       {savedSnapshotTime(snapshot.createdAt)}
@@ -5180,7 +5282,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                       }
                       onDoubleClick={() => addItem(item.kind)}
                     >
-                      <span className={`component-glyph ${item.kind}`}>
+                      <span className={`component-glyph kind-${item.kind}`}>
                         {item.glyph}
                       </span>
                       <span>
@@ -6413,6 +6515,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                   event.target.value,
                                 )
                               }
+                              onBlur={() => {
+                                if (activeSheet.normalized)
+                                  void flushNormalizedCellChanges().catch(() =>
+                                    setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요"),
+                                  );
+                              }}
                             >
                               <option>예</option>
                               <option>아니오</option>
@@ -6447,6 +6555,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                                   event.target.value,
                                 )
                               }
+                              onBlur={() => {
+                                if (activeSheet.normalized)
+                                  void flushNormalizedCellChanges().catch(() =>
+                                    setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요"),
+                                  );
+                              }}
                             />
                           )}
                           {validationError && (
