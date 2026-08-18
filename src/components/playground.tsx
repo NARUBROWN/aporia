@@ -474,70 +474,6 @@ const initialItems: CanvasItem[] = [
   { id: "pagination", kind: "pagination", label: "페이지 이동" },
 ];
 
-const initialSheets: Sheet[] = [
-  {
-    id: "stg-source",
-    name: "STG · 원천 수집",
-    columns: [
-      "배치 번호",
-      "원천 시스템",
-      "플랜트 코드",
-      "자재 번호",
-      "원천 값",
-      "단위",
-      "상태",
-    ],
-    columnTypes: ["number", "text", "text", "text", "number", "text", "text"],
-    rowIds: ["stg-row-1", "stg-row-2", "stg-row-3", "stg-row-4"],
-    rows: [
-      ["1042", "SAP_MM", "1100", "RM-1001", "1240.5", "KG", "수집 완료"],
-      ["1042", "SAP_MM", "1100", "PM-2001", "780", "EA", "수집 완료"],
-      ["1042", "SAP_CO", "1200", "RM-1002", "956.8", "KG", "수집 완료"],
-      ["1042", "SAP_CO", "1200", "RM-1001", "632.4", "KG", "수집 완료"],
-    ],
-  },
-  {
-    id: "dim-master",
-    name: "DIM · 기준정보",
-    columns: [
-      "자재 ID",
-      "자재 번호",
-      "자재명",
-      "자재 유형",
-      "사업장 ID",
-      "사업장명",
-    ],
-    columnTypes: ["number", "text", "text", "text", "number", "text"],
-    rowIds: ["dim-row-1", "dim-row-2", "dim-row-3", "dim-row-4"],
-    rows: [
-      ["101", "RM-1001", "재생 알루미늄", "원재료", "11", "울산 1공장"],
-      ["102", "RM-1002", "폴리올 수지", "원재료", "12", "대전 2공장"],
-      ["103", "PM-2001", "완충 포장재", "반제품", "11", "울산 1공장"],
-      ["104", "FG-3001", "친환경 패널", "완제품", "12", "대전 2공장"],
-    ],
-  },
-  {
-    id: "fact-flow",
-    name: "FACT · 정제 실적",
-    columns: [
-      "기간",
-      "사업장 ID",
-      "자재 ID",
-      "자재 번호",
-      "실적 유형",
-      "수량",
-      "단위",
-    ],
-    columnTypes: ["text", "number", "number", "text", "text", "number", "text"],
-    rowIds: ["fact-row-1", "fact-row-2", "fact-row-3", "fact-row-4"],
-    rows: [
-      ["202607", "11", "101", "RM-1001", "물질 투입", "1240.5", "KG"],
-      ["202607", "11", "103", "PM-2001", "포장재 투입", "780", "EA"],
-      ["202607", "12", "102", "RM-1002", "물질 투입", "956.8", "KG"],
-      ["202607", "12", "101", "RM-1001", "물질 투입", "632.4", "KG"],
-    ],
-  },
-];
 const emptySheet: Sheet = {
   id: "",
   name: "",
@@ -546,14 +482,6 @@ const emptySheet: Sheet = {
   rows: [],
 };
 
-const initialDataBinding: DataBindingConfig = {
-  primarySheet: "stg-source",
-  joinedSheet: "dim-master",
-  linkSourceId: "stg-source",
-  connectionPath: ["stg-source", "dim-master"],
-  selectedCandidateId: "stg-source:3-dim-master:1",
-  relationType: "N:1",
-};
 const blankDataBinding: DataBindingConfig = {
   primarySheet: "",
   joinedSheet: "",
@@ -562,38 +490,6 @@ const blankDataBinding: DataBindingConfig = {
   selectedCandidateId: "",
   relationType: "N:1",
 };
-const initialSheetRelations: SheetRelation[] = [
-  {
-    id: "relation-stg-dim-material",
-    sourceSheetId: "stg-source",
-    sourceColumn: "자재 번호",
-    targetSheetId: "dim-master",
-    targetColumn: "자재 번호",
-    relationType: "N:1",
-    updateOption: "none",
-    links: [
-      { sourceRowId: "stg-row-1", targetRowId: "dim-row-1" },
-      { sourceRowId: "stg-row-2", targetRowId: "dim-row-3" },
-      { sourceRowId: "stg-row-3", targetRowId: "dim-row-2" },
-      { sourceRowId: "stg-row-4", targetRowId: "dim-row-1" },
-    ],
-  },
-  {
-    id: "relation-dim-fact-material",
-    sourceSheetId: "dim-master",
-    sourceColumn: "자재 ID",
-    targetSheetId: "fact-flow",
-    targetColumn: "자재 ID",
-    relationType: "1:N",
-    updateOption: "none",
-    links: [
-      { sourceRowId: "dim-row-1", targetRowId: "fact-row-1" },
-      { sourceRowId: "dim-row-1", targetRowId: "fact-row-4" },
-      { sourceRowId: "dim-row-2", targetRowId: "fact-row-3" },
-      { sourceRowId: "dim-row-3", targetRowId: "fact-row-2" },
-    ],
-  },
-];
 const initialPages: BuilderPage[] = [
   {
     id: "lca-page",
@@ -2537,9 +2433,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [editingProjectName, setEditingProjectName] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const cancelProjectRenameRef = useRef(false);
-  const [pages, setPages] = useState(isTemporary ? blankPages : initialPages);
-  const [activePageId, setActivePageId] = useState(isTemporary ? "page-1" : "lca-page");
-  const [selectedId, setSelectedId] = useState(isTemporary ? "" : "table");
+  const [pages, setPages] = useState(blankPages);
+  const [activePageId, setActivePageId] = useState("page-1");
+  const [selectedId, setSelectedId] = useState("");
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [editingPageId, setEditingPageId] = useState<string | null>(null);
@@ -2549,7 +2445,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     y: 55,
     zoom: 0.9,
   });
-  const [sheets, setSheets] = useState<Sheet[]>(isTemporary ? [] : initialSheets);
+  const [sheets, setSheets] = useState<Sheet[]>([]);
   const [sheetFolders, setSheetFolders] = useState<SheetFolder[]>([]);
   const [sheetFolderEditor, setSheetFolderEditor] = useState<{
     folderId: string | null;
@@ -2571,7 +2467,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [cellValidationErrors, setCellValidationErrors] = useState<
     Record<string, string>
   >({});
-  const [activeSheetId, setActiveSheetId] = useState(isTemporary ? "" : "stg-source");
+  const [activeSheetId, setActiveSheetId] = useState("");
   const [editingSheetId, setEditingSheetId] = useState<string | null>(null);
   const [sheetNameDraft, setSheetNameDraft] = useState("");
   const [sheetSettingsOpen, setSheetSettingsOpen] = useState(false);
@@ -2593,9 +2489,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [newColumnDraft, setNewColumnDraft] = useState<NewColumnDraft | null>(
     null,
   );
-  const [sheetRelations, setSheetRelations] = useState<SheetRelation[]>(
-    isTemporary ? [] : initialSheetRelations,
-  );
+  const [sheetRelations, setSheetRelations] = useState<SheetRelation[]>([]);
   const [relationDraft, setRelationDraft] = useState<RelationDraft | null>(
     null,
   );
@@ -2620,23 +2514,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [propertyTab, setPropertyTab] = useState<"design" | "data" | "action">(
     "design",
   );
-  const [dataBinding, setDataBinding] = useState<DataBindingConfig>(
-    isTemporary ? blankDataBinding : initialDataBinding,
-  );
-  const [displayBindings, setDisplayBindings] = useState<DisplayBindings>(isTemporary ? {} : {
-    heading: {
-      sheetId: "dim-master",
-      field: "자재명",
-      fields: [],
-      rowId: "dim-row-1",
-    },
-    table: {
-      sheetId: "fact-flow",
-      field: "",
-      fields: ["기간", "사업장 ID", "자재 번호", "실적 유형", "수량", "단위"],
-      rowId: "",
-    },
-  });
+  const [dataBinding, setDataBinding] =
+    useState<DataBindingConfig>(blankDataBinding);
+  const [displayBindings, setDisplayBindings] = useState<DisplayBindings>({});
   const [filterBindings, setFilterBindings] = useState<FilterBindings>({});
   const [filterSelections, setFilterSelections] = useState<FilterSelections>({});
   const [hydrated, setHydrated] = useState(isTemporary);
@@ -5393,7 +5273,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             </div>
           </div>
           <div
-            className="canvas-viewport"
+            className={`canvas-viewport${!hydrated ? " loading" : ""}`}
             onPointerDown={startPan}
             onPointerMove={movePan}
             onPointerUp={stopPan}
@@ -5401,6 +5281,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             onWheel={handleCanvasWheel}
             onClick={clearCanvasSelection}
           >
+            {!hydrated && (
+              <div className="canvas-loading-state" role="status">
+                <span aria-hidden="true" />
+                <strong>프로젝트를 불러오는 중</strong>
+                <small>저장된 화면과 데이터를 준비하고 있습니다.</small>
+              </div>
+            )}
             <div
               className="canvas-stage"
               style={{
