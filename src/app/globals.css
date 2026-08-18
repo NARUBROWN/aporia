@@ -3790,6 +3790,19 @@ svg {
   font-size: 7px;
   line-height: 1.5;
 }
+.slicer-mode-help {
+  margin: -3px 0 11px;
+  padding: 8px 9px;
+  border-radius: 7px;
+  background: #f4f7f5;
+  color: #718078;
+  font-size: 6.5px;
+  line-height: 1.55;
+}
+.slicer-mode-help strong {
+  color: #356c51;
+  font-weight: 700;
+}
 .table-fx-badge {
   display: inline-grid;
   place-items: center;
@@ -7067,6 +7080,40 @@ svg {
 .transform-preview b {
   color: var(--green-2);
   text-align: center;
+}
+
+.transform-result-setting > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.transform-type-error,
+.transform-type-valid,
+.transform-output-type {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 7px;
+  line-height: 1.5;
+}
+
+.transform-type-error {
+  border: 1px solid #efcaca;
+  background: #fff3f3;
+  color: #a33f3f;
+}
+
+.transform-type-valid,
+.transform-output-type {
+  border: 1px solid #d7e8de;
+  background: #f1f7f3;
+  color: #376b51;
+}
+
+.transform-output-type strong {
+  font-weight: 800;
 }
 
 .transform-rule-summary {

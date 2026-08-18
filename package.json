@@ -17,6 +17,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "db:seed:lca": "tsx scripts/seed-lca-normalized.ts",
+    "db:classify:numeric": "tsx scripts/reclassify-numeric-sheet-columns.ts",
     "db:studio": "prisma studio"
   },
   "dependencies": {

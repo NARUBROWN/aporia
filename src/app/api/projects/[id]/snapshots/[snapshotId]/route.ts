@@ -1,6 +1,7 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requestHasProjectAccess } from "@/lib/project-security";
+import { migrateProjectDocument } from "@/lib/project-document-migration";
 
 export async function POST(
   request: Request,
@@ -19,6 +20,8 @@ export async function POST(
       where: { id: snapshotId, projectId: id },
     });
     if (!selected) return { error: "SNAPSHOT_NOT_FOUND" as const };
+    const migratedDocument = migrateProjectDocument(selected.document);
+    if (!migratedDocument) return { error: "INVALID_SNAPSHOT" as const };
 
     await transaction.projectSnapshot.create({
       data: {
@@ -32,7 +35,7 @@ export async function POST(
     const restored = await transaction.project.update({
       where: { id },
       data: {
-        document: selected.document as Prisma.InputJsonValue,
+        document: migratedDocument as Prisma.InputJsonValue,
         version: { increment: 1 },
       },
     });
@@ -40,7 +43,10 @@ export async function POST(
   });
 
   if ("error" in result)
-    return Response.json({ error: result.error }, { status: 404 });
+    return Response.json(
+      { error: result.error },
+      { status: result.error === "INVALID_SNAPSHOT" ? 422 : 404 },
+    );
 
   return Response.json({
     project: {

@@ -9,6 +9,7 @@ import {
   type ActiveSheetFilter,
   type FilterTarget,
 } from "@/lib/sheet-filtering";
+import { expandRelatedSheetIds } from "@/lib/normalized-sheet-loading";
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -273,6 +274,7 @@ type TransformCalculatedField = {
   };
   steps: TransformStep[];
   fallback: "empty" | "original";
+  outputType?: ColumnType;
 };
 type CalculatedField =
   | ArithmeticCalculatedField
@@ -648,17 +650,53 @@ function detectJoinCandidates(left: Sheet, right: Sheet): JoinCandidate[] {
 function buildRelationLinks(
   relation: Omit<SheetRelation, "links">,
   sheets: Sheet[],
+  calculatedFields: CalculatedField[] = [],
+  selectionValues: FilterSelections = {},
+  resolvingFieldIds: Set<string> = new Set(),
+  allRelations: SheetRelation[] = [],
 ) {
   const source = sheets.find((sheet) => sheet.id === relation.sourceSheetId);
   const target = sheets.find((sheet) => sheet.id === relation.targetSheetId);
   if (!source || !target) return [];
   const sourceColumn = source.columns.indexOf(relation.sourceColumn);
   const targetColumn = target.columns.indexOf(relation.targetColumn);
-  if (sourceColumn < 0 || targetColumn < 0) return [];
+  const sourceCalculatedField = calculatedFields.find(
+    (field) =>
+      field.resultSheetId === source.id && field.name === relation.sourceColumn,
+  );
+  const targetCalculatedField = calculatedFields.find(
+    (field) =>
+      field.resultSheetId === target.id && field.name === relation.targetColumn,
+  );
+  if (
+    (sourceColumn < 0 && !sourceCalculatedField) ||
+    (targetColumn < 0 && !targetCalculatedField)
+  )
+    return "links" in relation && Array.isArray(relation.links)
+      ? relation.links
+      : [];
+  const valueAt = (
+    sheet: Sheet,
+    rowIndex: number,
+    columnIndex: number,
+    calculatedField?: CalculatedField,
+  ) =>
+    calculatedField
+      ? calculateFieldValue(
+          calculatedField,
+          allRelations,
+          sheets,
+          sheet.rowIds[rowIndex],
+          calculatedFields,
+          selectionValues,
+          resolvingFieldIds,
+        )
+      : (sheet.rows[rowIndex]?.[columnIndex] ?? "");
   return source.rows.flatMap((sourceRow, sourceIndex) =>
     target.rows.flatMap((targetRow, targetIndex) =>
-      sourceRow[sourceColumn] &&
-      sourceRow[sourceColumn] === targetRow[targetColumn]
+      valueAt(source, sourceIndex, sourceColumn, sourceCalculatedField) &&
+      valueAt(source, sourceIndex, sourceColumn, sourceCalculatedField) ===
+        valueAt(target, targetIndex, targetColumn, targetCalculatedField)
         ? [
             {
               sourceRowId: source.rowIds[sourceIndex],
@@ -821,6 +859,25 @@ function calculateTransformField(
     }
     return value;
   }, source);
+}
+
+function transformOutputType(field: TransformCalculatedField) {
+  return field.outputType ?? "text";
+}
+
+function transformTypeIssues(
+  field: TransformCalculatedField,
+  sheets: Sheet[],
+) {
+  const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
+  if (!resultSheet) return [];
+  return resultSheet.rowIds.flatMap((rowId, rowIndex) => {
+    const value = calculateTransformField(field, sheets, rowId);
+    const validation = validateSheetValue(transformOutputType(field), value);
+    return validation.valid
+      ? []
+      : [{ rowIndex, value, message: validation.message }];
+  });
 }
 
 function relationAllowsSingleRowFrom(
@@ -1189,7 +1246,14 @@ function calculateFieldValue(
           relation.targetSheetId !== currentSheetId)
       )
         return "연결 없음";
-      const currentLinks = buildRelationLinks(relation, sheets);
+      const currentLinks = buildRelationLinks(
+        relation,
+        sheets,
+        calculatedFields,
+        selectionValues,
+        nextResolvingFieldIds,
+        relations,
+      );
       const relatedRowIds =
         relation.sourceSheetId === currentSheetId
           ? currentLinks
@@ -1621,6 +1685,7 @@ function ComponentDataPanel({
 }
 
 function SlicerDataPanel({
+  label,
   items,
   sheets,
   displayBindings,
@@ -1628,6 +1693,7 @@ function SlicerDataPanel({
   binding,
   onChange,
 }: {
+  label: string;
   items: CanvasItem[];
   sheets: Sheet[];
   displayBindings: DisplayBindings;
@@ -1708,6 +1774,21 @@ function SlicerDataPanel({
             <option value="variable">계산 변수</option>
           </select>
         </label>
+        <p className="slicer-mode-help">
+          {normalized.mode === "variable" ? (
+            <>
+              계산 필드를 만들거나 편집할 때 수식 항목에서
+              <strong> 선택값 · {label}</strong>을 선택해 사용합니다.
+              선택이 바뀌면 이 값을 참조한 계산 결과도 다시 계산됩니다.
+            </>
+          ) : (
+            <>
+              아래 <strong>영향받는 테이블</strong>에서 연결할 테이블을
+              선택하세요. 선택값과 관계로 연결된 행만 해당 테이블에
+              표시됩니다.
+            </>
+          )}
+        </p>
         <label>
           가져올 시트
           <select value={sourceSheet.id} onChange={(event) => {
@@ -2530,6 +2611,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     SavedProjectSnapshot[]
   >([]);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [manualSaveLoading, setManualSaveLoading] = useState(false);
   const [snapshotError, setSnapshotError] = useState("");
   const [restoringSnapshotId, setRestoringSnapshotId] = useState("");
   const [securityDialog, setSecurityDialog] = useState<"set-pin" | "delete" | null>(null);
@@ -2548,6 +2630,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   });
   const undoProjectRef = useRef<() => void>(() => undefined);
   const redoProjectRef = useRef<() => void>(() => undefined);
+  const manualSaveProjectRef = useRef<() => Promise<void>>(async () => undefined);
   const [sheetDockHeight, setSheetDockHeight] = useState(235);
   const [sheetDockMode, setSheetDockMode] =
     useState<SheetDockMode>("normal");
@@ -2589,6 +2672,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   );
   const numericFieldNames = (sheet: Sheet) => [
     ...numericColumns(sheet),
+    ...calculatedFields
+      .filter((field) => field.resultSheetId === sheet.id)
+      .map((field) => field.name),
+  ];
+  const relationFieldNames = (sheet: Sheet) => [
+    ...sheet.columns,
     ...calculatedFields
       .filter((field) => field.resultSheetId === sheet.id)
       .map((field) => field.name),
@@ -2833,6 +2922,29 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     }
   }
 
+  async function saveProjectManually() {
+    if (!projectId) {
+      router.push("/projects/new");
+      return;
+    }
+    setManualSaveLoading(true);
+    setSaveStatus("수동 저장 중");
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document: currentProjectDocument() }),
+      });
+      if (!response.ok) throw new Error("수동 저장에 실패했습니다.");
+      commitLatestProjectSnapshot();
+      setSaveStatus("수동 저장됨");
+    } catch {
+      setSaveStatus("수동 저장 실패 · 다시 시도하세요");
+    } finally {
+      setManualSaveLoading(false);
+    }
+  }
+
   function openSecurityDialog(dialog: "set-pin" | "delete") {
     setSecurityPin("");
     setSecurityError("");
@@ -2901,6 +3013,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   useEffect(() => {
     undoProjectRef.current = undoProject;
     redoProjectRef.current = redoProject;
+    manualSaveProjectRef.current = saveProjectManually;
   });
 
   function setItems(
@@ -3022,7 +3135,6 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         if (normalizedResponse.ok) {
           const normalized = (await normalizedResponse.json()) as NormalizedSheetPayload;
           if (
-            normalized.seedBatch?.status === "completed" &&
             Array.isArray(normalized.sheets) &&
             normalized.sheets.length > 0
           ) {
@@ -3063,7 +3175,6 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 links: [],
               })),
             );
-            setCalculatedFields([]);
           }
         }
         setSaveStatus("PostgreSQL에서 불러옴");
@@ -3126,19 +3237,62 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   );
 
   useEffect(() => {
-    if (
-      !hydrated ||
-      !activeSheet.normalized ||
-      activeSheet.rows.length > 0 ||
-      (activeSheet.rowCount ?? 0) === 0
-    )
-      return;
-    const sheetId = activeSheet.id;
+    if (!hydrated) return;
+    const requiredSheetIds = new Set<string>([activeSheet.id]);
+    Object.values(displayBindings).forEach((binding) =>
+      requiredSheetIds.add(binding.sheetId),
+    );
+    Object.values(filterBindings).forEach((binding) => {
+      requiredSheetIds.add(binding.sourceSheetId);
+      (binding.targets ?? []).forEach((target) =>
+        requiredSheetIds.add(target.sheetId),
+      );
+    });
+    calculatedFields.forEach((field) => {
+      requiredSheetIds.add(field.resultSheetId);
+      if (isConditionalSumField(field)) {
+        requiredSheetIds.add(field.sourceSheetId);
+        field.conditions.forEach((condition) => {
+          if (condition.sheetId) requiredSheetIds.add(condition.sheetId);
+        });
+      } else if (isArithmeticField(field)) {
+        const formulas = [
+          field.formula,
+          ...(field.condition?.cases.map((item) => item.formula) ?? []),
+        ];
+        formulas.flat().forEach((token) => {
+          if (token.kind === "field") requiredSheetIds.add(token.sheetId);
+        });
+      }
+    });
+    const hydratedSheetIds = expandRelatedSheetIds(
+      requiredSheetIds,
+      sheetRelations,
+    );
+    const sheetsToLoad = sheets.filter(
+      (sheet) =>
+        sheet.normalized &&
+        hydratedSheetIds.has(sheet.id) &&
+        (sheet.rowCount ?? 0) > sheet.rows.length &&
+        (sheet.rows.length === 0 || Boolean(sheet.nextCursor)),
+    );
+    if (sheetsToLoad.length === 0) return;
     const timeout = window.setTimeout(() => {
-      void loadNormalizedRows(sheetId);
+      sheetsToLoad.forEach((sheet) =>
+        void loadNormalizedRows(sheet.id, sheet.nextCursor),
+      );
     }, 0);
     return () => window.clearTimeout(timeout);
-  }, [activeSheet, hydrated, loadNormalizedRows]);
+  }, [
+    activeSheet.id,
+    calculatedFields,
+    displayBindings,
+    filterBindings,
+    hydrated,
+    loadNormalizedRows,
+    sheetRelations,
+    sheets,
+  ]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -3191,6 +3345,15 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   useEffect(() => {
     if (!hydrated) return;
     function handleHistoryShortcut(event: KeyboardEvent) {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        event.key.toLowerCase() === "s"
+      ) {
+        event.preventDefault();
+        if (!manualSaveLoading) void manualSaveProjectRef.current();
+        return;
+      }
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const key = event.key.toLowerCase();
       const undo = key === "z" && !event.shiftKey;
@@ -3203,7 +3366,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     }
     window.addEventListener("keydown", handleHistoryShortcut);
     return () => window.removeEventListener("keydown", handleHistoryShortcut);
-  }, [hydrated]);
+  }, [hydrated, manualSaveLoading]);
 
   useEffect(() => {
     if (!hydrated || !projectId) return;
@@ -4006,7 +4169,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     };
     const relation: SheetRelation = {
       ...relationWithoutLinks,
-      links: buildRelationLinks(relationWithoutLinks, sheets),
+      links: buildRelationLinks(
+        relationWithoutLinks,
+        sheets,
+        calculatedFields,
+        filterSelections,
+        new Set(),
+        sheetRelations,
+      ),
     };
     setSheetRelations((current) => upsertSheetRelation(current, relation));
     setRelationDraft(null);
@@ -4090,6 +4260,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         condition: field.condition,
         steps: field.steps,
         fallback: field.fallback,
+        outputType: transformOutputType(field),
         color: field.color,
       });
       return;
@@ -4157,6 +4328,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       },
       steps: [{ id: crypto.randomUUID(), type: "trim" }],
       fallback: "empty",
+      outputType:
+        activeSheet.columnTypes?.[
+          activeSheet.columns.indexOf(sourceColumn)
+        ] ?? "text",
     });
     setEditingCalculatedFieldId(null);
   }
@@ -4178,6 +4353,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   function saveTransformField() {
     if (!transformDraft?.name.trim() || !transformDraft.sourceColumn) return;
     const name = transformDraft.name.trim();
+    const candidateField: TransformCalculatedField = {
+      ...transformDraft,
+      id: editingCalculatedFieldId ?? "transform-validation",
+      kind: "transform",
+      name,
+      resultSheetId: activeSheet.id,
+    };
+    if (transformTypeIssues(candidateField, sheets).length > 0) return;
     if (
       activeSheet.columns.includes(name) ||
       activeCalculatedFields.some(
@@ -4222,6 +4405,21 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             : binding,
         ]),
       ),
+    );
+    setSheetRelations((current) =>
+      current.map((relation) => ({
+        ...relation,
+        sourceColumn:
+          relation.sourceSheetId === previous.resultSheetId &&
+          relation.sourceColumn === previous.name
+            ? nextName
+            : relation.sourceColumn,
+        targetColumn:
+          relation.targetSheetId === previous.resultSheetId &&
+          relation.targetColumn === previous.name
+            ? nextName
+            : relation.targetColumn,
+      })),
     );
   }
 
@@ -4854,6 +5052,16 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               <Icons.lock />
             </button>
           )}
+          <button
+            className="button secondary compact topbar-action-icon"
+            type="button"
+            onClick={saveProjectManually}
+            disabled={manualSaveLoading || snapshotLoading || !!restoringSnapshotId}
+            aria-label={manualSaveLoading ? "수동 저장 중" : "수동 저장"}
+            title="현재 프로젝트 저장 (⌘S / Ctrl+S)"
+          >
+            <Icons.save />
+          </button>
           {!isTemporary && (
             <button
               className="button compact topbar-action-icon danger-icon"
@@ -5290,6 +5498,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                   </>
                 ) : propertyTab === "data" && selected.kind === "slicer" ? (
                   <SlicerDataPanel
+                    label={selected.label}
                     items={items}
                     sheets={sheets}
                     displayBindings={displayBindings}
@@ -6040,7 +6249,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                               field.color ? { background: field.color } : undefined
                             }
                           >
-                            fx
+                            {isTransformField(field)
+                              ? columnTypeLabel(transformOutputType(field))
+                              : "fx"}
                           </span>
                           <span>{field.name}</span>
                         </button>
@@ -6625,7 +6836,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                             </div>
                           ) : isTransformField(field) ? (
                             <div className="developer-spec-formula">
-                              <b>{field.sourceColumn} 값을 순서대로 정제</b>
+                              <b>
+                                {field.sourceColumn} 값을 순서대로 정제 · 결과 타입: {columnTypeLabel(transformOutputType(field))}
+                              </b>
                               {field.condition.enabled && (
                                 <p>조건: {field.condition.column} {field.condition.operator} {field.condition.value}</p>
                               )}
@@ -6959,6 +7172,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 <section>
                   <small>원본과 조건</small>
                   <h2>{resultSheet.name} · {field.sourceColumn}</h2>
+                  <p className="transform-output-type">
+                    결과 타입 · <strong>{columnTypeLabel(transformOutputType(field))}</strong>
+                  </p>
                   <p className="transform-rule-summary">{field.condition.enabled ? `${field.condition.column} 값이 '${field.condition.value}' 조건을 만족할 때 정제` : "모든 행에 적용"}</p>
                 </section>
                 <section>
@@ -7154,6 +7370,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             before: activeSheet.rows[index]?.[activeSheet.columns.indexOf(transformDraft.sourceColumn)] ?? "",
             after: calculateTransformField(previewField, sheets, rowId),
           }));
+          const typeIssues = transformTypeIssues(previewField, sheets);
+          const firstTypeIssue = typeIssues[0];
           const updateStep = (id: string, next: TransformStep) => setTransformDraft((current) => current && ({ ...current, steps: current.steps.map((step) => step.id === id ? next : step) }));
           return (
             <div className="relation-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCalculatedFieldEditor(); }}>
@@ -7183,9 +7401,22 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                     {transformDraft.condition.enabled && <label>조건 불일치 시<select value={transformDraft.fallback} onChange={(event) => setTransformDraft((current) => current && ({ ...current, fallback: event.target.value as TransformDraft["fallback"] }))}><option value="empty">빈 값</option><option value="original">원본 값 유지</option></select></label>}
                   </section>
                   <section><small>4 · 미리보기 · 최대 5개</small><div className="transform-preview">{preview.map((item) => <div key={item.rowId}><span>{item.before || "빈 값"}</span><b>→</b><strong>{item.after || "빈 값"}</strong></div>)}</div></section>
-                  <section><label>필드 이름<input value={transformDraft.name} onChange={(event) => setTransformDraft((current) => current && ({ ...current, name: event.target.value }))} /></label></section>
+                  <section className="transform-result-setting">
+                    <small>5 · 결과 필드</small>
+                    <div>
+                      <label>필드 이름<input value={transformDraft.name} onChange={(event) => setTransformDraft((current) => current && ({ ...current, name: event.target.value }))} /></label>
+                      <label>결과 타입<select aria-label="정제 결과 타입" value={transformOutputType(previewField)} onChange={(event) => setTransformDraft((current) => current && ({ ...current, outputType: event.target.value as ColumnType }))}>{columnTypeOptions.map((option) => <option key={option.type} value={option.type}>{option.label}</option>)}</select></label>
+                    </div>
+                    {firstTypeIssue ? (
+                      <p className="transform-type-error" role="alert">
+                        {columnTypeLabel(transformOutputType(previewField))} 타입으로 저장할 수 없습니다. {firstTypeIssue.rowIndex + 1}행의 ‘{firstTypeIssue.value || "빈 값"}’이(가) 호환되지 않습니다. {typeIssues.length > 1 && `외 ${typeIssues.length - 1}건`}
+                      </p>
+                    ) : (
+                      <p className="transform-type-valid">현재 정제 결과가 모두 {columnTypeLabel(transformOutputType(previewField))} 타입과 호환됩니다.</p>
+                    )}
+                  </section>
                 </div>
-                <footer><button onClick={closeCalculatedFieldEditor}>취소</button><button className="confirm" disabled={!transformDraft.name.trim() || !transformDraft.sourceColumn || transformDraft.steps.length === 0} onClick={saveTransformField}>{editingCalculatedFieldId ? "정제 필드 수정 저장" : "정제 필드 만들기"}</button></footer>
+                <footer><button onClick={closeCalculatedFieldEditor}>취소</button><button className="confirm" disabled={!transformDraft.name.trim() || !transformDraft.sourceColumn || transformDraft.steps.length === 0 || typeIssues.length > 0} onClick={saveTransformField}>{editingCalculatedFieldId ? "정제 필드 수정 저장" : "정제 필드 만들기"}</button></footer>
               </div>
             </div>
           );
@@ -8118,20 +8349,49 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           const target = sheets.find(
             (sheet) => sheet.id === relationDraft.targetSheetId,
           )!;
-          const sourceIndex = source.columns.indexOf(
-            relationDraft.sourceColumn,
-          );
-          const targetIndex = target.columns.indexOf(
-            relationDraft.targetColumn,
-          );
+          const sourceFields = relationFieldNames(source);
+          const targetFields = relationFieldNames(target);
+          const relationValue = (
+            sheet: Sheet,
+            column: string,
+            rowIndex: number,
+          ) => {
+            const calculatedField = calculatedFields.find(
+              (field) =>
+                field.resultSheetId === sheet.id && field.name === column,
+            );
+            return calculatedField
+              ? calculateFieldValue(
+                  calculatedField,
+                  sheetRelations,
+                  sheets,
+                  sheet.rowIds[rowIndex],
+                  calculatedFields,
+                  filterSelections,
+                )
+              : (sheet.rows[rowIndex]?.[sheet.columns.indexOf(column)] ?? "");
+          };
           const matches = [
             ...new Set(
               source.rows
-                .map((row) => row[sourceIndex])
+                .map((_, sourceRowIndex) =>
+                  relationValue(
+                    source,
+                    relationDraft.sourceColumn,
+                    sourceRowIndex,
+                  ),
+                )
                 .filter(
                   (value) =>
                     value &&
-                    target.rows.some((row) => row[targetIndex] === value),
+                    target.rows.some(
+                      (_, targetRowIndex) =>
+                        relationValue(
+                          target,
+                          relationDraft.targetColumn,
+                          targetRowIndex,
+                        ) === value,
+                    ),
                 ),
             ),
           ];
@@ -8289,8 +8549,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                             )
                           }
                         >
-                          {source.columns.map((column) => (
-                            <option key={column}>{column}</option>
+                          {sourceFields.map((column) => (
+                            <option key={column} value={column}>
+                              {source.columns.includes(column)
+                                ? column
+                                : `FN · ${column}`}
+                            </option>
                           ))}
                         </select>
                       </label>
@@ -8309,8 +8573,12 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                             )
                           }
                         >
-                          {target.columns.map((column) => (
-                            <option key={column}>{column}</option>
+                          {targetFields.map((column) => (
+                            <option key={column} value={column}>
+                              {target.columns.includes(column)
+                                ? column
+                                : `FN · ${column}`}
+                            </option>
                           ))}
                         </select>
                       </label>
