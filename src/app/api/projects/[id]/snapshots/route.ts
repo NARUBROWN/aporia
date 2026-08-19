@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { requestHasOwnedProjectAccess } from "@/lib/auth";
+import { requestHasOwnedProjectAccess, requestHasProjectWriteAccess } from "@/lib/auth";
 import {
   NormalizedDefinitionError,
   syncDocumentSheets,
@@ -63,7 +63,7 @@ export async function POST(
   const { id } = await context.params;
   const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true, ownerId: true } });
   if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!await requestHasOwnedProjectAccess(request, id, existing.ownerId, existing.passwordHash))
+  if (!await requestHasProjectWriteAccess(request, id, existing.ownerId, existing.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   const raw = await request.text();
   if (raw.length > 5_000_000)

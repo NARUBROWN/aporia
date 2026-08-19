@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { isValidPin, verifyPin } from "@/lib/project-security";
-import { requestHasOwnedProjectAccess } from "@/lib/auth";
+import { requestHasOwnedProjectAccess, requestHasProjectWriteAccess, requestIsProjectOwner } from "@/lib/auth";
 import {
   NormalizedDefinitionError,
   syncDocumentSheets,
@@ -113,7 +113,7 @@ export async function PUT(
   const { id } = await context.params;
   const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true, ownerId: true } });
   if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!await requestHasOwnedProjectAccess(request, id, existing.ownerId, existing.passwordHash))
+  if (!await requestHasProjectWriteAccess(request, id, existing.ownerId, existing.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   const raw = await request.text();
 
@@ -215,7 +215,9 @@ export async function DELETE(request: Request, context: RouteContext<"/api/proje
   const { id } = await context.params;
   const project = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true, ownerId: true } });
   if (!project) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
+  if (project.ownerId
+    ? !await requestIsProjectOwner(request, project.ownerId)
+    : !await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   if (project.passwordHash) {
     const body = await request.json().catch(() => null) as { pin?: unknown } | null;

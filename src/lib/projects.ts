@@ -7,6 +7,7 @@ export type ProjectListItem = {
   componentCount: number;
   updatedAt: string;
   hasPassword: boolean;
+  accessLevel: "owner" | "edit" | "view";
 };
 
 type ProjectDocument = {
@@ -65,5 +66,6 @@ export function toProjectListItem(project: {
       : 0,
     updatedAt: project.updatedAt.toISOString(),
     hasPassword: !!project.passwordHash,
+    accessLevel: "owner",
   };
 }

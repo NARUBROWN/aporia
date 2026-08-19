@@ -17,6 +17,7 @@ import { expandRelatedSheetIds } from "@/lib/normalized-sheet-loading";
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icons } from "@/components/icons";
+import { ProjectMembersButton } from "@/components/project-members";
 
 type ComponentKind =
   | "input"
@@ -2427,9 +2428,11 @@ function SheetErdView({
   );
 }
 
-export function Playground({ projectId, projectName, hasPassword }: { projectId: string | null; projectName: string; hasPassword: boolean }) {
+export function Playground({ projectId, projectName, hasPassword, accessLevel = "owner" }: { projectId: string | null; projectName: string; hasPassword: boolean; accessLevel?: "owner" | "edit" | "view" }) {
   const router = useRouter();
   const isTemporary = projectId === null;
+  const canEdit = isTemporary || accessLevel === "owner" || accessLevel === "edit";
+  const isOwner = !isTemporary && accessLevel === "owner";
   const [displayProjectName, setDisplayProjectName] = useState(projectName);
   const [editingProjectName, setEditingProjectName] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
@@ -2522,7 +2525,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const [filterSelections, setFilterSelections] = useState<FilterSelections>({});
   const [hydrated, setHydrated] = useState(isTemporary);
   const skipInitialSaveRef = useRef(true);
-  const [saveStatus, setSaveStatus] = useState(isTemporary ? "저장되지 않는 임시 캔버스" : "데이터베이스 연결 중");
+  const [saveStatus, setSaveStatus] = useState(isTemporary ? "저장되지 않는 임시 캔버스" : accessLevel === "view" ? "보기 전용" : "데이터베이스 연결 중");
   const [snapshotPanelOpen, setSnapshotPanelOpen] = useState(false);
   const [savedSnapshots, setSavedSnapshots] = useState<
     SavedProjectSnapshot[]
@@ -3165,7 +3168,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             setCalculatedFields(normalized.calculatedFields ?? []);
           }
         }
-        setSaveStatus("PostgreSQL에서 불러옴");
+        setSaveStatus(canEdit ? "PostgreSQL에서 불러옴" : "보기 전용");
       })
       .catch(() => {
         if (!cancelled) setSaveStatus("DB 연결 실패");
@@ -3176,7 +3179,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [canEdit, projectId]);
 
   const loadNormalizedRows = useCallback(
     async (sheetId: string, cursor?: string | null) => {
@@ -3283,7 +3286,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   ]);
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || !canEdit) return;
     const snapshot: ProjectSnapshot = {
       pages,
       activePageId,
@@ -3310,6 +3313,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   }, [
     activePageId,
     calculatedFields,
+    canEdit,
     canvasView,
     dataBinding,
     displayBindings,
@@ -3331,7 +3335,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   );
 
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || !canEdit) return;
     function handleHistoryShortcut(event: KeyboardEvent) {
       if (
         (event.metaKey || event.ctrlKey) &&
@@ -3354,10 +3358,10 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     }
     window.addEventListener("keydown", handleHistoryShortcut);
     return () => window.removeEventListener("keydown", handleHistoryShortcut);
-  }, [hydrated, manualSaveLoading]);
+  }, [canEdit, hydrated, manualSaveLoading]);
 
   useEffect(() => {
-    if (!hydrated || !projectId) return;
+    if (!hydrated || !projectId || !canEdit) return;
     if (skipInitialSaveRef.current) {
       skipInitialSaveRef.current = false;
       return;
@@ -3393,6 +3397,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   }, [
     activePageId,
     calculatedFields,
+    canEdit,
     canvasView,
     dataBinding,
     displayBindings,
@@ -3406,6 +3411,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   ]);
 
   useEffect(() => {
+    if (!canEdit) return;
     function handleDeleteKey(event: KeyboardEvent) {
       if (
         (event.key !== "Backspace" && event.key !== "Delete") ||
@@ -3461,7 +3467,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     }
     window.addEventListener("keydown", handleDeleteKey);
     return () => window.removeEventListener("keydown", handleDeleteKey);
-  }, [activePageId, selectedId]);
+  }, [activePageId, canEdit, selectedId]);
 
   useEffect(() => {
     if (editingColumnIndex === null) return;
@@ -4978,7 +4984,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   return (
     <div
-      className={`studio ui-studio sheet-dock-${sheetDockMode}`}
+      className={`studio ui-studio sheet-dock-${sheetDockMode}${canEdit ? "" : " read-only"}`}
       style={{
         gridTemplateRows:
           sheetDockMode === "minimized"
@@ -5009,15 +5015,15 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             <button
               className="project-name-button"
               type="button"
-              title="더블클릭하여 프로젝트 이름 변경"
-              onDoubleClick={startProjectRename}
+              title={canEdit ? "더블클릭하여 프로젝트 이름 변경" : "보기 전용 프로젝트"}
+              onDoubleClick={canEdit ? startProjectRename : undefined}
             >
               {displayProjectName}
             </button>
           )}
         </div>
         <div className="studio-actions">
-          <div
+          {canEdit && <div
             className="project-history-actions"
             aria-label="프로젝트 편집 기록"
           >
@@ -5041,12 +5047,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             >
               <Icons.redo />
             </button>
-          </div>
+          </div>}
           <span className="saved">
             <Icons.check />
             {saveStatus}
           </span>
-          {!isTemporary && !hasPassword && (
+          {isOwner && projectId && <ProjectMembersButton projectId={projectId} />}
+          {isOwner && !hasPassword && (
             <button
               className="button secondary compact topbar-action-icon"
               type="button"
@@ -5057,7 +5064,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               <Icons.lock />
             </button>
           )}
-          <button
+          {canEdit && <button
             className="button secondary compact topbar-action-icon"
             type="button"
             onClick={saveProjectManually}
@@ -5066,8 +5073,8 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             title="현재 프로젝트 저장 (⌘S / Ctrl+S)"
           >
             <Icons.save />
-          </button>
-          {!isTemporary && (
+          </button>}
+          {isOwner && (
             <button
               className="button compact topbar-action-icon danger-icon"
               type="button"
@@ -5078,7 +5085,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               <Icons.trash />
             </button>
           )}
-          <button
+          {canEdit && <button
             className={`button primary compact snapshot-trigger${isTemporary ? "" : " topbar-action-icon"}`}
             type="button"
             onClick={saveProjectSnapshot}
@@ -5088,7 +5095,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
           >
             {isTemporary ? <Icons.plus /> : <Icons.clock />}
             {isTemporary ? "프로젝트로 저장" : null}
-          </button>
+          </button>}
         </div>
       </header>
 
@@ -6935,9 +6942,9 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       {securityDialog && (
         <div className="relation-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !securityLoading) setSecurityDialog(null); }}>
           <section className="security-dialog" role="dialog" aria-modal="true" aria-labelledby="security-dialog-title">
-            <span>{securityDialog === "set-pin" ? "PROJECT SECURITY" : "DELETE PROJECT"}</span>
+            <span>{securityDialog === "set-pin" ? "PROJECT SECURITY" : "삭제"}</span>
             <h2 id="security-dialog-title">{securityDialog === "set-pin" ? "4자리 비밀번호 설정" : "프로젝트 삭제"}</h2>
-            <p>{securityDialog === "set-pin" ? "다음 입장부터 이 비밀번호를 입력해야 합니다." : hasPassword ? "삭제하려면 프로젝트 비밀번호를 다시 입력하세요. 데이터는 소프트 삭제됩니다." : "이 프로젝트를 목록에서 삭제합니다. 데이터는 소프트 삭제됩니다."}</p>
+            <p>{securityDialog === "set-pin" ? "다음 입장부터 이 비밀번호를 입력해야 합니다." : hasPassword ? "삭제하려면 프로젝트 비밀번호를 다시 입력하세요. 데이터는 복구할 수 없습니다." : "이 프로젝트를 목록에서 삭제합니다. 데이터는 복구할 수 없습니다."}</p>
             {(securityDialog === "set-pin" || hasPassword) && <input type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoFocus aria-label="프로젝트 비밀번호 4자리" value={securityPin} onChange={(event) => setSecurityPin(event.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="••••" onKeyDown={(event) => { if (event.key === "Enter") void submitSecurityDialog(); }} />}
             {securityError && <small role="alert">{securityError}</small>}
             <div className="security-dialog-actions"><button className="button secondary" type="button" disabled={securityLoading} onClick={() => setSecurityDialog(null)}>취소</button><button className={`button ${securityDialog === "delete" ? "danger" : "primary"}`} type="button" disabled={securityLoading || ((securityDialog === "set-pin" || hasPassword) && securityPin.length !== 4)} onClick={submitSecurityDialog}>{securityLoading ? "처리 중" : securityDialog === "set-pin" ? "설정하기" : "삭제하기"}</button></div>

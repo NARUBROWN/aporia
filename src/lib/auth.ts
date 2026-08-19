@@ -112,6 +112,36 @@ export async function requestHasOwnedProjectAccess(
   ownerId: string | null,
   passwordHash: string | null,
 ) {
-  if (ownerId) return (await authenticatedUserFromRequest(request))?.id === ownerId;
+  if (ownerId) {
+    const user = await authenticatedUserFromRequest(request);
+    if (!user) return false;
+    if (user.id === ownerId) return true;
+    return !!await prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId, userId: user.id } },
+      select: { id: true },
+    });
+  }
   return requestHasProjectAccess(request, projectId, passwordHash);
+}
+
+export async function requestHasProjectWriteAccess(
+  request: Request,
+  projectId: string,
+  ownerId: string | null,
+  passwordHash: string | null,
+) {
+  if (!ownerId) return requestHasProjectAccess(request, projectId, passwordHash);
+  const user = await authenticatedUserFromRequest(request);
+  if (!user) return false;
+  if (user.id === ownerId) return true;
+  const member = await prisma.projectMember.findUnique({
+    where: { projectId_userId: { projectId, userId: user.id } },
+    select: { permission: true },
+  });
+  return member?.permission === "edit";
+}
+
+export async function requestIsProjectOwner(request: Request, ownerId: string | null) {
+  if (!ownerId) return false;
+  return (await authenticatedUserFromRequest(request))?.id === ownerId;
 }

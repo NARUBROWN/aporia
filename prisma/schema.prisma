@@ -18,6 +18,7 @@ model Project {
   updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
   ownerId      String?           @map("owner_id") @db.Uuid
   owner        User?             @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  members      ProjectMember[]
   snapshots    ProjectSnapshot[]
   sheets       ProjectSheet[]
   seedBatches  SeedBatch[]
@@ -29,23 +30,39 @@ model Project {
 }
 
 model User {
-  id           String        @id @db.Uuid
-  username     String        @unique @db.Text
-  name         String        @db.Text
-  passwordHash String        @map("password_hash") @db.Text
-  deletedAt    DateTime?     @map("deleted_at") @db.Timestamptz(6)
-  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
-  termsAgreedAt   DateTime   @map("terms_agreed_at") @db.Timestamptz(6)
-  privacyAgreedAt DateTime   @map("privacy_agreed_at") @db.Timestamptz(6)
-  termsVersion    String     @map("terms_version") @db.Text
-  privacyVersion  String     @map("privacy_version") @db.Text
-  theme            String     @default("indigo-lavender") @db.Text
-  sessions     AuthSession[]
-  projects     Project[]
+  id                 String          @id @db.Uuid
+  username           String          @unique @db.Text
+  name               String          @db.Text
+  passwordHash       String          @map("password_hash") @db.Text
+  deletedAt          DateTime?       @map("deleted_at") @db.Timestamptz(6)
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  termsAgreedAt      DateTime        @map("terms_agreed_at") @db.Timestamptz(6)
+  privacyAgreedAt    DateTime        @map("privacy_agreed_at") @db.Timestamptz(6)
+  termsVersion       String          @map("terms_version") @db.Text
+  privacyVersion     String          @map("privacy_version") @db.Text
+  theme              String          @default("indigo-lavender") @db.Text
+  sessions           AuthSession[]
+  projects           Project[]
+  projectMemberships ProjectMember[]
 
   @@index([deletedAt])
   @@map("users")
+}
+
+model ProjectMember {
+  id         String   @id @db.Uuid
+  projectId  String   @map("project_id") @db.Text
+  userId     String   @map("user_id") @db.Uuid
+  permission String   @db.Text
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("project_members")
 }
 
 model AuthSession {
@@ -208,15 +225,15 @@ model SeedError {
 }
 
 model ProjectSnapshot {
-  id             String   @id @db.Text
-  projectId      String   @map("project_id") @db.Text
-  document       Json
-  projectVersion BigInt   @map("project_version")
-  reason         String   @default("manual") @db.Text
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  sheets         SnapshotSheet[]
-  relations      SnapshotRelation[]
+  id               String                    @id @db.Text
+  projectId        String                    @map("project_id") @db.Text
+  document         Json
+  projectVersion   BigInt                    @map("project_version")
+  reason           String                    @default("manual") @db.Text
+  createdAt        DateTime                  @default(now()) @map("created_at") @db.Timestamptz(6)
+  project          Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sheets           SnapshotSheet[]
+  relations        SnapshotRelation[]
   calculatedFields SnapshotCalculatedField[]
 
   @@index([projectId, createdAt(sort: Desc)])
@@ -224,14 +241,14 @@ model ProjectSnapshot {
 }
 
 model SnapshotSheet {
-  id              String          @id @db.Uuid
-  snapshotId      String          @map("snapshot_id") @db.Text
-  originalSheetId String          @map("original_sheet_id") @db.Text
-  name            String          @db.Text
-  color           String?         @db.Text
-  comment         String?         @db.Text
-  displayOrder    Int             @map("display_order")
-  snapshot        ProjectSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  id              String           @id @db.Uuid
+  snapshotId      String           @map("snapshot_id") @db.Text
+  originalSheetId String           @map("original_sheet_id") @db.Text
+  name            String           @db.Text
+  color           String?          @db.Text
+  comment         String?          @db.Text
+  displayOrder    Int              @map("display_order")
+  snapshot        ProjectSnapshot  @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
   columns         SnapshotColumn[]
   rows            SnapshotRow[]
 
@@ -241,15 +258,15 @@ model SnapshotSheet {
 }
 
 model SnapshotColumn {
-  id               String        @id @db.Uuid
-  snapshotSheetId  String        @map("snapshot_sheet_id") @db.Uuid
-  name             String        @db.Text
-  dataType         String        @map("data_type") @db.Text
-  color            String?       @db.Text
-  comment          String?       @db.Text
-  displayOrder     Int           @map("display_order")
-  snapshotSheet    SnapshotSheet @relation(fields: [snapshotSheetId], references: [id], onDelete: Cascade)
-  cells            SnapshotCell[]
+  id              String         @id @db.Uuid
+  snapshotSheetId String         @map("snapshot_sheet_id") @db.Uuid
+  name            String         @db.Text
+  dataType        String         @map("data_type") @db.Text
+  color           String?        @db.Text
+  comment         String?        @db.Text
+  displayOrder    Int            @map("display_order")
+  snapshotSheet   SnapshotSheet  @relation(fields: [snapshotSheetId], references: [id], onDelete: Cascade)
+  cells           SnapshotCell[]
 
   @@unique([snapshotSheetId, name])
   @@index([snapshotSheetId, displayOrder])
@@ -257,11 +274,11 @@ model SnapshotColumn {
 }
 
 model SnapshotRow {
-  id              String        @id @db.Uuid
-  snapshotSheetId String        @map("snapshot_sheet_id") @db.Uuid
-  originalRowId   String        @map("original_row_id") @db.Text
-  rowOrder        Int           @map("row_order")
-  snapshotSheet   SnapshotSheet @relation(fields: [snapshotSheetId], references: [id], onDelete: Cascade)
+  id              String         @id @db.Uuid
+  snapshotSheetId String         @map("snapshot_sheet_id") @db.Uuid
+  originalRowId   String         @map("original_row_id") @db.Text
+  rowOrder        Int            @map("row_order")
+  snapshotSheet   SnapshotSheet  @relation(fields: [snapshotSheetId], references: [id], onDelete: Cascade)
   cells           SnapshotCell[]
 
   @@unique([snapshotSheetId, originalRowId])
@@ -281,18 +298,18 @@ model SnapshotCell {
 }
 
 model SnapshotRelation {
-  id                    String          @id @db.Uuid
-  snapshotId            String          @map("snapshot_id") @db.Text
-  originalRelationId    String          @map("original_relation_id") @db.Text
-  sourceSheetOriginalId String          @map("source_sheet_original_id") @db.Text
-  sourceColumn          String          @map("source_column") @db.Text
-  targetSheetOriginalId String          @map("target_sheet_original_id") @db.Text
-  targetColumn          String          @map("target_column") @db.Text
-  relationType          String          @map("relation_type") @db.Text
-  relationOrigin        String          @default("manual") @map("relation_origin") @db.Text
-  updateOption          String?         @map("update_option") @db.Text
-  displayOrder          Int             @map("display_order")
-  snapshot              ProjectSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  id                    String                 @id @db.Uuid
+  snapshotId            String                 @map("snapshot_id") @db.Text
+  originalRelationId    String                 @map("original_relation_id") @db.Text
+  sourceSheetOriginalId String                 @map("source_sheet_original_id") @db.Text
+  sourceColumn          String                 @map("source_column") @db.Text
+  targetSheetOriginalId String                 @map("target_sheet_original_id") @db.Text
+  targetColumn          String                 @map("target_column") @db.Text
+  relationType          String                 @map("relation_type") @db.Text
+  relationOrigin        String                 @default("manual") @map("relation_origin") @db.Text
+  updateOption          String?                @map("update_option") @db.Text
+  displayOrder          Int                    @map("display_order")
+  snapshot              ProjectSnapshot        @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
   links                 SnapshotRelationLink[]
 
   @@unique([snapshotId, originalRelationId])
@@ -313,15 +330,15 @@ model SnapshotRelationLink {
 }
 
 model SnapshotCalculatedField {
-  id                    String          @id @db.Uuid
-  snapshotId            String          @map("snapshot_id") @db.Text
-  originalFieldId       String          @map("original_field_id") @db.Text
-  resultSheetOriginalId String          @map("result_sheet_original_id") @db.Text
-  name                  String          @db.Text
-  fieldType             String          @map("field_type") @db.Text
-  color                 String?         @db.Text
-  displayOrder          Int             @map("display_order")
-  snapshot              ProjectSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  id                    String                         @id @db.Uuid
+  snapshotId            String                         @map("snapshot_id") @db.Text
+  originalFieldId       String                         @map("original_field_id") @db.Text
+  resultSheetOriginalId String                         @map("result_sheet_original_id") @db.Text
+  name                  String                         @db.Text
+  fieldType             String                         @map("field_type") @db.Text
+  color                 String?                        @db.Text
+  displayOrder          Int                            @map("display_order")
+  snapshot              ProjectSnapshot                @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
   rules                 SnapshotCalculationRule[]
   conditions            SnapshotCalculationCondition[]
 
@@ -331,27 +348,27 @@ model SnapshotCalculatedField {
 }
 
 model SnapshotCalculationRule {
-  id                       String                  @id @db.Uuid
-  snapshotCalculatedFieldId String                 @map("snapshot_calculated_field_id") @db.Uuid
-  stepOrder                Int                     @map("step_order")
-  operation                String                  @db.Text
-  arguments                Json                    @default("{}")
-  calculatedField          SnapshotCalculatedField @relation(fields: [snapshotCalculatedFieldId], references: [id], onDelete: Cascade)
+  id                        String                  @id @db.Uuid
+  snapshotCalculatedFieldId String                  @map("snapshot_calculated_field_id") @db.Uuid
+  stepOrder                 Int                     @map("step_order")
+  operation                 String                  @db.Text
+  arguments                 Json                    @default("{}")
+  calculatedField           SnapshotCalculatedField @relation(fields: [snapshotCalculatedFieldId], references: [id], onDelete: Cascade)
 
   @@unique([snapshotCalculatedFieldId, stepOrder])
   @@map("snapshot_calculation_rules")
 }
 
 model SnapshotCalculationCondition {
-  id                       String                  @id @db.Uuid
-  snapshotCalculatedFieldId String                 @map("snapshot_calculated_field_id") @db.Uuid
-  conditionOrder           Int                     @map("condition_order")
-  sourceSheetOriginalId    String?                 @map("source_sheet_original_id") @db.Text
-  sourceColumn             String?                 @map("source_column") @db.Text
-  operator                 String                  @db.Text
-  operandType              String                  @map("operand_type") @db.Text
-  operandValue             String?                 @map("operand_value") @db.Text
-  calculatedField          SnapshotCalculatedField @relation(fields: [snapshotCalculatedFieldId], references: [id], onDelete: Cascade)
+  id                        String                  @id @db.Uuid
+  snapshotCalculatedFieldId String                  @map("snapshot_calculated_field_id") @db.Uuid
+  conditionOrder            Int                     @map("condition_order")
+  sourceSheetOriginalId     String?                 @map("source_sheet_original_id") @db.Text
+  sourceColumn              String?                 @map("source_column") @db.Text
+  operator                  String                  @db.Text
+  operandType               String                  @map("operand_type") @db.Text
+  operandValue              String?                 @map("operand_value") @db.Text
+  calculatedField           SnapshotCalculatedField @relation(fields: [snapshotCalculatedFieldId], references: [id], onDelete: Cascade)
 
   @@unique([snapshotCalculatedFieldId, conditionOrder])
   @@map("snapshot_calculation_conditions")

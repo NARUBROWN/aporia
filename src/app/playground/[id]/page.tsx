@@ -12,11 +12,15 @@ export default async function ProjectPlaygroundPage({ params }: PageProps<"/play
   const project = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { id: true, name: true, passwordHash: true, ownerId: true } });
   if (!project) notFound();
   const user = await currentUser();
-  if (project.ownerId && user?.id !== project.ownerId) notFound();
+  const membership = project.ownerId && user?.id !== project.ownerId && user
+    ? await prisma.projectMember.findUnique({ where: { projectId_userId: { projectId: id, userId: user.id } }, select: { permission: true } })
+    : null;
+  if (project.ownerId && user?.id !== project.ownerId && !membership) notFound();
   if (!project.ownerId && project.passwordHash) {
     const access = (await cookies()).get(projectAccessCookieName(id))?.value;
     if (access !== projectAccessToken(id, project.passwordHash))
       return <ProjectPinGate projectId={id} projectName={project.name} />;
   }
-  return <AppShell active="playground" compact><Playground projectId={project.id} projectName={project.name} hasPassword={!!project.passwordHash} /></AppShell>;
+  const accessLevel = !project.ownerId ? "edit" : user?.id === project.ownerId ? "owner" : membership?.permission === "edit" ? "edit" : "view";
+  return <AppShell active="playground" compact><Playground projectId={project.id} projectName={project.name} hasPassword={!!project.passwordHash} accessLevel={accessLevel} /></AppShell>;
 }

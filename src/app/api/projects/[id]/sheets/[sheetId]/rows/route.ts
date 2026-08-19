@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { postgres, quoteRegisteredIdentifier } from "@/lib/postgres";
-import { requestHasOwnedProjectAccess } from "@/lib/auth";
+import { requestHasOwnedProjectAccess, requestHasProjectWriteAccess } from "@/lib/auth";
 import {
   normalizeStoredColumnType,
   validateSheetValue,
@@ -85,7 +85,7 @@ export async function PATCH(
   if (!sheet)
     return Response.json({ error: "SHEET_NOT_FOUND" }, { status: 404 });
   if (
-    !(await requestHasOwnedProjectAccess(
+    !(await requestHasProjectWriteAccess(
       request,
       id,
       sheet.project.ownerId,
