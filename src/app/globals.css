@@ -100,13 +100,11 @@ button {
 @keyframes page-leave {
   to {
     opacity: 0;
-    transform: translateY(-4px);
   }
 }
 @keyframes page-enter {
   from {
     opacity: 0;
-    transform: translateY(10px);
   }
 }
 
