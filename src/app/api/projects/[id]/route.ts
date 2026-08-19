@@ -1,7 +1,11 @@
-import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { isValidPin, verifyPin } from "@/lib/project-security";
 import { requestHasOwnedProjectAccess } from "@/lib/auth";
+import {
+  NormalizedDefinitionError,
+  syncNormalizedDefinitions,
+  withoutNormalizedDefinitions,
+} from "@/lib/normalized-definitions";
 
 type DocumentRecord = Record<string, unknown>;
 
@@ -143,13 +147,17 @@ export async function PUT(
   if ("name" in body && (!requestedName || requestedName.length > 120)) {
     return Response.json({ error: "INVALID_PROJECT_NAME" }, { status: 400 });
   }
-  const document = normalized.document as Prisma.InputJsonValue;
+  const sourceDocument = normalized.document as DocumentRecord;
+  const document = withoutNormalizedDefinitions(sourceDocument);
   const snapshotReason =
     "snapshotReason" in body && body.snapshotReason === "manual_save"
       ? "manual_save"
       : null;
-  const project = snapshotReason
-    ? await prisma.$transaction(async (transaction) => {
+  let project;
+  try {
+    project = await prisma.$transaction(async (transaction) => {
+      await syncNormalizedDefinitions(transaction, id, sourceDocument);
+      if (snapshotReason) {
         const updated = await transaction.project.update({
           where: { id },
           data: {
@@ -169,9 +177,9 @@ export async function PUT(
           },
         });
         return updated;
-      })
-    : await prisma.project.update({
-      where: { id },
+      }
+      return transaction.project.update({
+        where: { id },
         data: {
           document,
           version: { increment: 1 },
@@ -179,6 +187,15 @@ export async function PUT(
         },
         select: { id: true, name: true, version: true, updatedAt: true },
       });
+    });
+  } catch (error) {
+    if (error instanceof NormalizedDefinitionError)
+      return Response.json(
+        { error: error.code, message: error.message },
+        { status: 422 },
+      );
+    throw error;
+  }
 
   return Response.json({
     project: {

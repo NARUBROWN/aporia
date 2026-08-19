@@ -64,6 +64,7 @@ type SheetFolder = {
 
 type NormalizedSheetPayload = {
   seedBatch?: { status?: string } | null;
+  calculatedFields?: CalculatedField[];
   relations?: Array<{
     id: string;
     sourceSheetId: string;
@@ -3161,6 +3162,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
                 links: [],
               })),
             );
+            setCalculatedFields(normalized.calculatedFields ?? []);
           }
         }
         setSaveStatus("PostgreSQL에서 불러옴");
@@ -3575,7 +3577,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
 
   function addSheet() {
     const sequence = sheets.length + 1;
-    const sheetId = `table-${crypto.randomUUID()}`;
+    const sheetId = crypto.randomUUID();
     const sheet: Sheet = {
       id: sheetId,
       name: `새 시트 ${sequence}`,

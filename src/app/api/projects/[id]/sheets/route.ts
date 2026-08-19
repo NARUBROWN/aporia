@@ -14,7 +14,7 @@ export async function GET(
   if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
-  const [sheets, latestBatch, relations] = await Promise.all([
+  const [sheets, latestBatch, relations, calculatedFields] = await Promise.all([
     prisma.projectSheet.findMany({
       where: { projectId: id },
       orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
@@ -60,6 +60,23 @@ export async function GET(
         targetColumn: { select: { name: true } },
       },
     }),
+    prisma.calculatedFieldRecord.findMany({
+      where: { sheet: { projectId: id } },
+      orderBy: { displayOrder: "asc" },
+      select: {
+        id: true,
+        name: true,
+        fieldType: true,
+        color: true,
+        sheetId: true,
+        rules: {
+          where: { operation: "definition" },
+          orderBy: { stepOrder: "asc" },
+          take: 1,
+          select: { arguments: true },
+        },
+      },
+    }),
   ]);
   return Response.json(
     {
@@ -100,6 +117,18 @@ export async function GET(
         relationType: relation.relationType,
         relationOrigin: relation.relationOrigin,
       })),
+      calculatedFields: calculatedFields.flatMap((field) => {
+        const definition = field.rules[0]?.arguments;
+        if (!definition || typeof definition !== "object" || Array.isArray(definition)) return [];
+        return [{
+          ...definition,
+          id: field.id,
+          name: field.name,
+          kind: field.fieldType,
+          color: field.color ?? undefined,
+          resultSheetId: field.sheetId,
+        }];
+      }),
     },
     { headers: { "Cache-Control": "no-store" } },
   );
