@@ -1,16 +1,14 @@
 import { prisma } from "@/lib/prisma";
 import { emptyProjectDocument, toProjectListItem } from "@/lib/projects";
 import { authenticatedUserFromRequest } from "@/lib/auth";
+import { listOwnedProjects } from "@/lib/project-queries";
 
 export async function GET(request: Request) {
   const user = await authenticatedUserFromRequest(request);
   if (!user) return Response.json({ error: "UNAUTHORIZED" }, { status: 401 });
-  const projects = await prisma.project.findMany({
-    where: { deletedAt: null, ownerId: user.id },
-    orderBy: { updatedAt: "desc" },
-  });
+  const { projects } = await listOwnedProjects(user.id);
   return Response.json(
-    { projects: projects.map(toProjectListItem) },
+    { projects },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

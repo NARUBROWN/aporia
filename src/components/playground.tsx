@@ -2817,23 +2817,39 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
     const run = async () => {
       const changes = [...pendingNormalizedCellChangesRef.current.entries()];
       if (changes.length === 0) return;
+      const changesBySheet = new Map<
+        string,
+        Array<[string, PendingNormalizedCellChange]>
+      >();
+      for (const entry of changes) {
+        const sheetChanges = changesBySheet.get(entry[1].sheetId) ?? [];
+        sheetChanges.push(entry);
+        changesBySheet.set(entry[1].sheetId, sheetChanges);
+      }
       await Promise.all(
-        changes.map(async ([key, change]) => {
+        [...changesBySheet.entries()].map(async ([sheetId, sheetChanges]) => {
           const response = await fetch(
-            `/api/projects/${projectId}/sheets/${change.sheetId}/rows`,
+            `/api/projects/${projectId}/sheets/${sheetId}/rows`,
             {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                rowId: change.rowId,
-                columnIndex: change.columnIndex,
-                value: change.value,
+                changes: sheetChanges.map(([, change]) => ({
+                  rowId: change.rowId,
+                  columnIndex: change.columnIndex,
+                  value: change.value,
+                })),
               }),
             },
           );
           if (!response.ok) throw new Error("시트 셀을 저장하지 못했습니다.");
-          if (pendingNormalizedCellChangesRef.current.get(key)?.value === change.value)
-            pendingNormalizedCellChangesRef.current.delete(key);
+          for (const [key, change] of sheetChanges) {
+            if (
+              pendingNormalizedCellChangesRef.current.get(key)?.value ===
+              change.value
+            )
+              pendingNormalizedCellChangesRef.current.delete(key);
+          }
         }),
       );
       setSaveStatus("데이터 변경사항 저장됨");

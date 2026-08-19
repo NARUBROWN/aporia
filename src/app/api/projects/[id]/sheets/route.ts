@@ -14,24 +14,53 @@ export async function GET(
   if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
-  const sheets = await prisma.projectSheet.findMany({
-    where: { projectId: id },
-    orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
-    include: { columns: { orderBy: { displayOrder: "asc" } } },
-  });
-  const latestBatch = await prisma.seedBatch.findFirst({
-    where: { projectId: id },
-    orderBy: { createdAt: "desc" },
-    select: { id: true, status: true, importedRows: true, failedRows: true },
-  });
-  const relations = await prisma.sheetRelation.findMany({
-    where: { sourceSheet: { projectId: id } },
-    orderBy: { createdAt: "asc" },
-    include: {
-      sourceColumn: { select: { name: true } },
-      targetColumn: { select: { name: true } },
-    },
-  });
+  const [sheets, latestBatch, relations] = await Promise.all([
+    prisma.projectSheet.findMany({
+      where: { projectId: id },
+      orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        color: true,
+        comment: true,
+        displayOrder: true,
+        origin: true,
+        rowCount: true,
+        dataRevision: true,
+        columns: {
+          orderBy: { displayOrder: "asc" },
+          select: {
+            id: true,
+            name: true,
+            dataType: true,
+            displayOrder: true,
+            color: true,
+            comment: true,
+            nullable: true,
+            primaryKey: true,
+          },
+        },
+      },
+    }),
+    prisma.seedBatch.findFirst({
+      where: { projectId: id },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, status: true, importedRows: true, failedRows: true },
+    }),
+    prisma.sheetRelation.findMany({
+      where: { sourceSheet: { projectId: id } },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        sourceSheetId: true,
+        targetSheetId: true,
+        relationType: true,
+        relationOrigin: true,
+        sourceColumn: { select: { name: true } },
+        targetColumn: { select: { name: true } },
+      },
+    }),
+  ]);
   return Response.json(
     {
       seedBatch: latestBatch

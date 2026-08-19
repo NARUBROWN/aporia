@@ -2,6 +2,7 @@ import "server-only";
 
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
+import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import { requestHasProjectAccess } from "@/lib/project-security";
 
@@ -55,16 +56,27 @@ export function expiredSessionCookie() {
   return `${sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
 }
 
-export async function currentUser() {
+export const currentUser = cache(async function currentUser() {
   const token = (await cookies()).get(sessionCookieName)?.value;
   if (!token) return null;
   const session = await prisma.authSession.findUnique({
     where: { tokenHash: tokenHash(token) },
-    include: { user: true },
+    select: {
+      expiresAt: true,
+      user: {
+        select: {
+          id: true,
+          username: true,
+          name: true,
+          theme: true,
+          deletedAt: true,
+        },
+      },
+    },
   });
   if (!session || session.expiresAt <= new Date() || session.user.deletedAt) return null;
   return { id: session.user.id, username: session.user.username, name: session.user.name, theme: session.user.theme };
-}
+});
 
 export async function sessionFromRequest(request: Request) {
   const token = request.headers.get("cookie")?.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${sessionCookieName}=`))?.slice(sessionCookieName.length + 1);
@@ -73,7 +85,22 @@ export async function sessionFromRequest(request: Request) {
 }
 
 export async function authenticatedUserFromRequest(request: Request) {
-  const session = await sessionFromRequest(request);
+  const token = request.headers
+    .get("cookie")
+    ?.split(";")
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(`${sessionCookieName}=`))
+    ?.slice(sessionCookieName.length + 1);
+  if (!token) return null;
+  const session = await prisma.authSession.findUnique({
+    where: { tokenHash: tokenHash(token) },
+    select: {
+      expiresAt: true,
+      user: {
+        select: { id: true, username: true, name: true, deletedAt: true },
+      },
+    },
+  });
   if (!session || session.expiresAt <= new Date() || session.user.deletedAt)
     return null;
   return { id: session.user.id, username: session.user.username, name: session.user.name };

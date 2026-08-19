@@ -66,7 +66,19 @@ export async function GET(
   context: RouteContext<"/api/projects/[id]">,
 ) {
   const { id } = await context.params;
-  const project = await prisma.project.findFirst({ where: { id, deletedAt: null } });
+  const project = await prisma.project.findFirst({
+    where: { id, deletedAt: null },
+    select: {
+      id: true,
+      name: true,
+      document: true,
+      createdAt: true,
+      version: true,
+      updatedAt: true,
+      passwordHash: true,
+      ownerId: true,
+    },
+  });
 
   if (!project) {
     return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
@@ -145,6 +157,7 @@ export async function PUT(
             version: { increment: 1 },
             ...(requestedName ? { name: requestedName } : {}),
           },
+          select: { id: true, name: true, version: true, updatedAt: true },
         });
         await transaction.projectSnapshot.create({
           data: {
@@ -158,12 +171,13 @@ export async function PUT(
         return updated;
       })
     : await prisma.project.update({
-        where: { id },
+      where: { id },
         data: {
           document,
           version: { increment: 1 },
           ...(requestedName ? { name: requestedName } : {}),
         },
+        select: { id: true, name: true, version: true, updatedAt: true },
       });
 
   return Response.json({
@@ -187,6 +201,10 @@ export async function DELETE(request: Request, context: RouteContext<"/api/proje
     if (!isValidPin(body?.pin) || !verifyPin(body.pin, project.passwordHash))
       return Response.json({ error: "INVALID_PIN" }, { status: 401 });
   }
-  await prisma.project.update({ where: { id }, data: { deletedAt: new Date() } });
+  await prisma.project.update({
+    where: { id },
+    data: { deletedAt: new Date() },
+    select: { id: true },
+  });
   return Response.json({ ok: true });
 }

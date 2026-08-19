@@ -24,6 +24,7 @@ model Project {
 
   @@index([deletedAt])
   @@index([ownerId])
+  @@index([ownerId, deletedAt, updatedAt(sort: Desc)])
   @@map("projects")
 }
 
@@ -81,7 +82,7 @@ model ProjectSheet {
   calculatedFields  CalculatedFieldRecord[]
 
   @@unique([projectId, name])
-  @@index([projectId, displayOrder])
+  @@index([projectId, displayOrder, createdAt])
   @@map("project_sheets")
 }
 
@@ -122,7 +123,7 @@ model SheetRelation {
   targetColumn   SheetColumn  @relation("RelationTargetColumn", fields: [targetColumnId], references: [id], onDelete: Cascade)
 
   @@unique([sourceColumnId, targetColumnId])
-  @@index([sourceSheetId])
+  @@index([sourceSheetId, createdAt])
   @@index([targetSheetId])
   @@map("sheet_relations")
 }

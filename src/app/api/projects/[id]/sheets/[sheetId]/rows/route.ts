@@ -6,24 +6,42 @@ import {
   validateSheetValue,
 } from "@/lib/sheet-value-validation";
 
+function findSheetWithAccess(projectId: string, sheetId: string) {
+  return prisma.projectSheet.findFirst({
+    where: { id: sheetId, projectId, project: { deletedAt: null } },
+    select: {
+      id: true,
+      name: true,
+      physicalTableName: true,
+      rowCount: true,
+      project: { select: { passwordHash: true, ownerId: true } },
+      columns: {
+        orderBy: { displayOrder: "asc" as const },
+        select: {
+          physicalColumnName: true,
+          dataType: true,
+        },
+      },
+    },
+  });
+}
+
 export async function GET(
   request: Request,
   context: RouteContext<"/api/projects/[id]/sheets/[sheetId]/rows">,
 ) {
   const { id, sheetId } = await context.params;
-  const project = await prisma.project.findFirst({
-    where: { id, deletedAt: null },
-    select: { passwordHash: true, ownerId: true },
-  });
-  if (!project) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
-    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
-
-  const sheet = await prisma.projectSheet.findFirst({
-    where: { id: sheetId, projectId: id },
-    include: { columns: { orderBy: { displayOrder: "asc" } } },
-  });
+  const sheet = await findSheetWithAccess(id, sheetId);
   if (!sheet) return Response.json({ error: "SHEET_NOT_FOUND" }, { status: 404 });
+  if (
+    !(await requestHasOwnedProjectAccess(
+      request,
+      id,
+      sheet.project.ownerId,
+      sheet.project.passwordHash,
+    ))
+  )
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const url = new URL(request.url);
   const requestedLimit = Number(url.searchParams.get("limit") || 100);
@@ -63,69 +81,108 @@ export async function PATCH(
   context: RouteContext<"/api/projects/[id]/sheets/[sheetId]/rows">,
 ) {
   const { id, sheetId } = await context.params;
-  const project = await prisma.project.findFirst({
-    where: { id, deletedAt: null },
-    select: { passwordHash: true, ownerId: true },
-  });
-  if (!project)
-    return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
-    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
-
-  const sheet = await prisma.projectSheet.findFirst({
-    where: { id: sheetId, projectId: id },
-    include: { columns: { orderBy: { displayOrder: "asc" } } },
-  });
+  const sheet = await findSheetWithAccess(id, sheetId);
   if (!sheet)
     return Response.json({ error: "SHEET_NOT_FOUND" }, { status: 404 });
+  if (
+    !(await requestHasOwnedProjectAccess(
+      request,
+      id,
+      sheet.project.ownerId,
+      sheet.project.passwordHash,
+    ))
+  )
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const body = (await request.json()) as {
     rowId?: unknown;
     columnIndex?: unknown;
     value?: unknown;
+    changes?: Array<{
+      rowId?: unknown;
+      columnIndex?: unknown;
+      value?: unknown;
+    }>;
   };
-  if (
-    typeof body.rowId !== "string" ||
-    !/^[1-9]\d*$/.test(body.rowId) ||
-    !Number.isInteger(body.columnIndex) ||
-    typeof body.value !== "string"
-  )
+  const requestedChanges = Array.isArray(body.changes)
+    ? body.changes
+    : [{ rowId: body.rowId, columnIndex: body.columnIndex, value: body.value }];
+  if (requestedChanges.length === 0 || requestedChanges.length > 200)
     return Response.json({ error: "INVALID_ROW_UPDATE" }, { status: 400 });
 
-  const column = sheet.columns[body.columnIndex as number];
-  if (!column)
-    return Response.json({ error: "COLUMN_NOT_FOUND" }, { status: 404 });
-  const type = normalizeStoredColumnType(column.dataType);
-  const validation = validateSheetValue(type, body.value);
-  if (!validation.valid)
-    return Response.json(
-      { error: "INVALID_VALUE", message: validation.message },
-      { status: 422 },
-    );
+  const changes = [] as Array<{
+    rowId: string;
+    columnIndex: number;
+    value: string;
+    storedValue: string | boolean | null;
+    physicalColumnName: string;
+  }>;
+  for (const change of requestedChanges) {
+    if (
+      typeof change.rowId !== "string" ||
+      !/^[1-9]\d*$/.test(change.rowId) ||
+      !Number.isInteger(change.columnIndex) ||
+      typeof change.value !== "string"
+    )
+      return Response.json({ error: "INVALID_ROW_UPDATE" }, { status: 400 });
+    const columnIndex = change.columnIndex as number;
+    const column = sheet.columns[columnIndex];
+    if (!column)
+      return Response.json({ error: "COLUMN_NOT_FOUND" }, { status: 404 });
+    const type = normalizeStoredColumnType(column.dataType);
+    const validation = validateSheetValue(type, change.value);
+    if (!validation.valid)
+      return Response.json(
+        { error: "INVALID_VALUE", message: validation.message },
+        { status: 422 },
+      );
+    changes.push({
+      rowId: change.rowId,
+      columnIndex,
+      value: validation.value,
+      storedValue:
+        validation.value === ""
+          ? null
+          : type === "boolean"
+            ? validation.value === "예"
+            : validation.value,
+      physicalColumnName: column.physicalColumnName,
+    });
+  }
 
-  const storedValue =
-    validation.value === ""
-      ? null
-      : type === "boolean"
-        ? validation.value === "예"
-        : validation.value;
-  const result = await postgres.query<{ row_id: string }>(
-    `UPDATE project_data.${quoteRegisteredIdentifier(sheet.physicalTableName)}
-        SET ${quoteRegisteredIdentifier(column.physicalColumnName)} = $1
-      WHERE _row_id = $2::bigint
-      RETURNING _row_id::text AS row_id`,
-    [storedValue, body.rowId],
-  );
-  if (result.rowCount === 0)
-    return Response.json({ error: "ROW_NOT_FOUND" }, { status: 404 });
+  const client = await postgres.connect();
+  try {
+    await client.query("BEGIN");
+    for (const change of changes) {
+      const result = await client.query<{ row_id: string }>(
+        `UPDATE project_data.${quoteRegisteredIdentifier(sheet.physicalTableName)}
+            SET ${quoteRegisteredIdentifier(change.physicalColumnName)} = $1
+          WHERE _row_id = $2::bigint
+          RETURNING _row_id::text AS row_id`,
+        [change.storedValue, change.rowId],
+      );
+      if (result.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return Response.json({ error: "ROW_NOT_FOUND" }, { status: 404 });
+      }
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 
   await prisma.projectSheet.update({
     where: { id: sheet.id },
     data: { dataRevision: { increment: 1 } },
   });
   return Response.json({
-    rowId: body.rowId,
-    columnIndex: body.columnIndex,
-    value: validation.value,
+    changes: changes.map(({ rowId, columnIndex, value }) => ({
+      rowId,
+      columnIndex,
+      value,
+    })),
   });
 }

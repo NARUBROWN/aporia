@@ -7,7 +7,13 @@ const globalForPostgres = globalThis as unknown as { aporiaPostgres?: pg.Pool };
 
 export const postgres =
   globalForPostgres.aporiaPostgres ??
-  new pg.Pool({ connectionString, max: 10, idleTimeoutMillis: 30_000 });
+  new pg.Pool({
+    connectionString,
+    max: Number(process.env.DATABASE_POOL_SIZE ?? 10),
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
+    keepAlive: true,
+  });
 
 if (process.env.NODE_ENV !== "production") globalForPostgres.aporiaPostgres = postgres;
 

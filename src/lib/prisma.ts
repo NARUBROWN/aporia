@@ -1,5 +1,6 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/generated/prisma/client";
+import { postgres } from "@/lib/postgres";
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -14,11 +15,9 @@ const globalForPrisma = globalThis as unknown as {
 export const prisma =
   globalForPrisma.aporiaPrisma ??
   new PrismaClient({
-    adapter: new PrismaPg({
-      connectionString,
-      max: 10,
-      idleTimeoutMillis: 30_000,
-    }),
+    // Prisma and the normalized-sheet SQL path share one bounded pool. This
+    // prevents both clients from competing for separate Supabase connections.
+    adapter: new PrismaPg(postgres),
   });
 
 if (process.env.NODE_ENV !== "production") {

@@ -41,6 +41,7 @@ export async function GET(
       reason: true,
       createdAt: true,
     },
+    take: 50,
   });
 
   return Response.json(
@@ -82,6 +83,7 @@ export async function POST(
     const project = await transaction.project.update({
       where: { id },
       data: { document, version: { increment: 1 } },
+      select: { id: true, version: true, updatedAt: true },
     });
     const snapshot = await transaction.projectSnapshot.create({
       data: {
@@ -90,6 +92,12 @@ export async function POST(
         document,
         projectVersion: project.version,
         reason: "manual",
+      },
+      select: {
+        id: true,
+        projectVersion: true,
+        reason: true,
+        createdAt: true,
       },
     });
     return { project, snapshot };

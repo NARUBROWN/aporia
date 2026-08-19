@@ -12,7 +12,11 @@ export async function POST(request: Request, context: RouteContext<"/api/project
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   if (current.passwordHash) return Response.json({ error: "PASSWORD_ALREADY_SET" }, { status: 409 });
   const passwordHash = hashPin(body.pin);
-  await prisma.project.update({ where: { id }, data: { passwordHash } });
+  await prisma.project.update({
+    where: { id },
+    data: { passwordHash },
+    select: { id: true },
+  });
   const response = Response.json({ ok: true });
   response.headers.append("Set-Cookie", `${projectAccessCookieName(id)}=${projectAccessToken(id, passwordHash)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`);
   return response;
