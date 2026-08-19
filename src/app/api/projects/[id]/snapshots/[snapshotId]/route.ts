@@ -2,6 +2,17 @@ import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requestHasOwnedProjectAccess } from "@/lib/auth";
 import { migrateProjectDocument } from "@/lib/project-document-migration";
+import {
+  NormalizedDefinitionError,
+  syncDocumentSheets,
+  syncNormalizedDefinitions,
+  withoutNormalizedDefinitions,
+} from "@/lib/normalized-definitions";
+import {
+  alignSnapshotDocumentToProject,
+  hydrateNormalizedSnapshot,
+  snapshotNormalizedProject,
+} from "@/lib/normalized-snapshots";
 
 export async function POST(
   request: Request,
@@ -13,34 +24,43 @@ export async function POST(
   if (!await requestHasOwnedProjectAccess(request, id, existing.ownerId, existing.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
-  const result = await prisma.$transaction(async (transaction) => {
-    const project = await transaction.project.findFirst({ where: { id, deletedAt: null } });
-    if (!project) return { error: "PROJECT_NOT_FOUND" as const };
-    const selected = await transaction.projectSnapshot.findFirst({
-      where: { id: snapshotId, projectId: id },
+  let result;
+  try {
+    result = await prisma.$transaction(async (transaction) => {
+      const project = await transaction.project.findFirst({ where: { id, deletedAt: null } });
+      if (!project) return { error: "PROJECT_NOT_FOUND" as const };
+      const selected = await transaction.projectSnapshot.findFirst({
+        where: { id: snapshotId, projectId: id },
+      });
+      if (!selected) return { error: "SNAPSHOT_NOT_FOUND" as const };
+      const storedDocument = migrateProjectDocument(selected.document);
+      if (!storedDocument) return { error: "INVALID_SNAPSHOT" as const };
+      const beforeRestore = await transaction.projectSnapshot.create({
+        data: {
+          id: crypto.randomUUID(),
+          projectId: id,
+          document: project.document as Prisma.InputJsonValue,
+          projectVersion: project.version,
+          reason: "before_restore",
+        },
+      });
+      await snapshotNormalizedProject(transaction, beforeRestore.id, id, project.document as Record<string, unknown>);
+      const migratedDocument = await hydrateNormalizedSnapshot(transaction, selected.id, storedDocument);
+      const alignedDocument = await alignSnapshotDocumentToProject(transaction, id, migratedDocument);
+      await syncDocumentSheets(transaction, id, alignedDocument);
+      await syncNormalizedDefinitions(transaction, id, alignedDocument);
+      const document = withoutNormalizedDefinitions(alignedDocument);
+      const restored = await transaction.project.update({
+        where: { id },
+        data: { document, version: { increment: 1 } },
+      });
+      return { project: restored };
     });
-    if (!selected) return { error: "SNAPSHOT_NOT_FOUND" as const };
-    const migratedDocument = migrateProjectDocument(selected.document);
-    if (!migratedDocument) return { error: "INVALID_SNAPSHOT" as const };
-
-    await transaction.projectSnapshot.create({
-      data: {
-        id: crypto.randomUUID(),
-        projectId: id,
-        document: project.document as Prisma.InputJsonValue,
-        projectVersion: project.version,
-        reason: "before_restore",
-      },
-    });
-    const restored = await transaction.project.update({
-      where: { id },
-      data: {
-        document: migratedDocument as Prisma.InputJsonValue,
-        version: { increment: 1 },
-      },
-    });
-    return { project: restored };
-  });
+  } catch (error) {
+    if (error instanceof NormalizedDefinitionError)
+      return Response.json({ error: error.code, message: error.message }, { status: 422 });
+    throw error;
+  }
 
   if ("error" in result)
     return Response.json(

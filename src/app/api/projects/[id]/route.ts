@@ -3,9 +3,11 @@ import { isValidPin, verifyPin } from "@/lib/project-security";
 import { requestHasOwnedProjectAccess } from "@/lib/auth";
 import {
   NormalizedDefinitionError,
+  syncDocumentSheets,
   syncNormalizedDefinitions,
   withoutNormalizedDefinitions,
 } from "@/lib/normalized-definitions";
+import { snapshotNormalizedProject } from "@/lib/normalized-snapshots";
 
 type DocumentRecord = Record<string, unknown>;
 
@@ -156,6 +158,7 @@ export async function PUT(
   let project;
   try {
     project = await prisma.$transaction(async (transaction) => {
+      await syncDocumentSheets(transaction, id, sourceDocument);
       await syncNormalizedDefinitions(transaction, id, sourceDocument);
       if (snapshotReason) {
         const updated = await transaction.project.update({
@@ -167,7 +170,7 @@ export async function PUT(
           },
           select: { id: true, name: true, version: true, updatedAt: true },
         });
-        await transaction.projectSnapshot.create({
+        const snapshot = await transaction.projectSnapshot.create({
           data: {
             id: crypto.randomUUID(),
             projectId: id,
@@ -176,6 +179,7 @@ export async function PUT(
             reason: snapshotReason,
           },
         });
+        await snapshotNormalizedProject(transaction, snapshot.id, id, sourceDocument);
         return updated;
       }
       return transaction.project.update({

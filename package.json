@@ -19,6 +19,7 @@
     "db:seed:lca": "tsx scripts/seed-lca-normalized.ts",
     "db:classify:numeric": "tsx scripts/reclassify-numeric-sheet-columns.ts",
     "db:normalize:existing": "tsx scripts/normalize-existing-projects.ts",
+    "db:normalize:snapshots": "tsx scripts/normalize-project-snapshots.ts",
     "db:studio": "prisma studio"
   },
   "dependencies": {

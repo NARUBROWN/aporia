@@ -1,6 +1,12 @@
-import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requestHasOwnedProjectAccess } from "@/lib/auth";
+import {
+  NormalizedDefinitionError,
+  syncDocumentSheets,
+  syncNormalizedDefinitions,
+  withoutNormalizedDefinitions,
+} from "@/lib/normalized-definitions";
+import { snapshotNormalizedProject } from "@/lib/normalized-snapshots";
 
 type DocumentRecord = Record<string, unknown>;
 
@@ -78,30 +84,41 @@ export async function POST(
   )
     return Response.json({ error: "INVALID_DOCUMENT" }, { status: 400 });
 
-  const document = body.document as DocumentRecord as Prisma.InputJsonValue;
-  const result = await prisma.$transaction(async (transaction) => {
-    const project = await transaction.project.update({
-      where: { id },
-      data: { document, version: { increment: 1 } },
-      select: { id: true, version: true, updatedAt: true },
+  const sourceDocument = body.document as DocumentRecord;
+  const document = withoutNormalizedDefinitions(sourceDocument);
+  let result;
+  try {
+    result = await prisma.$transaction(async (transaction) => {
+      await syncDocumentSheets(transaction, id, sourceDocument);
+      await syncNormalizedDefinitions(transaction, id, sourceDocument);
+      const project = await transaction.project.update({
+        where: { id },
+        data: { document, version: { increment: 1 } },
+        select: { id: true, version: true, updatedAt: true },
+      });
+      const snapshot = await transaction.projectSnapshot.create({
+        data: {
+          id: crypto.randomUUID(),
+          projectId: id,
+          document,
+          projectVersion: project.version,
+          reason: "manual",
+        },
+        select: {
+          id: true,
+          projectVersion: true,
+          reason: true,
+          createdAt: true,
+        },
+      });
+      await snapshotNormalizedProject(transaction, snapshot.id, id, sourceDocument);
+      return { project, snapshot };
     });
-    const snapshot = await transaction.projectSnapshot.create({
-      data: {
-        id: crypto.randomUUID(),
-        projectId: id,
-        document,
-        projectVersion: project.version,
-        reason: "manual",
-      },
-      select: {
-        id: true,
-        projectVersion: true,
-        reason: true,
-        createdAt: true,
-      },
-    });
-    return { project, snapshot };
-  });
+  } catch (error) {
+    if (error instanceof NormalizedDefinitionError)
+      return Response.json({ error: error.code, message: error.message }, { status: 422 });
+    throw error;
+  }
 
   return Response.json({
     project: {

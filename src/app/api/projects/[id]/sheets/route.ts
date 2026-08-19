@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { requestHasOwnedProjectAccess } from "@/lib/auth";
+import { deserializeCalculatedField } from "@/lib/normalized-definitions";
 
 export async function GET(
   request: Request,
@@ -70,10 +71,15 @@ export async function GET(
         color: true,
         sheetId: true,
         rules: {
-          where: { operation: "definition" },
           orderBy: { stepOrder: "asc" },
-          take: 1,
-          select: { arguments: true },
+          select: { stepOrder: true, operation: true, arguments: true },
+        },
+        conditions: {
+          orderBy: { conditionOrder: "asc" },
+          select: {
+            conditionOrder: true, operator: true, operandType: true, operandValue: true,
+            sourceColumn: { select: { name: true, sheetId: true } },
+          },
         },
       },
     }),
@@ -117,18 +123,7 @@ export async function GET(
         relationType: relation.relationType,
         relationOrigin: relation.relationOrigin,
       })),
-      calculatedFields: calculatedFields.flatMap((field) => {
-        const definition = field.rules[0]?.arguments;
-        if (!definition || typeof definition !== "object" || Array.isArray(definition)) return [];
-        return [{
-          ...definition,
-          id: field.id,
-          name: field.name,
-          kind: field.fieldType,
-          color: field.color ?? undefined,
-          resultSheetId: field.sheetId,
-        }];
-      }),
+      calculatedFields: calculatedFields.map(deserializeCalculatedField),
     },
     { headers: { "Cache-Control": "no-store" } },
   );

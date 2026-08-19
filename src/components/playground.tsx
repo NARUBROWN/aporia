@@ -3586,7 +3586,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
       columnComments: {},
       columns: ["이름", "생성일"],
       columnTypes: ["text", "date"],
-      rowIds: [`${sheetId}-internal-row-${crypto.randomUUID()}`],
+      rowIds: ["1"],
       rows: [["", ""]],
     };
     setSheets((current) => [...current, sheet]);
@@ -3872,7 +3872,14 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
               ...sheet,
               rowIds: [
                 ...sheet.rowIds,
-                `${sheet.id}-internal-row-${crypto.randomUUID()}`,
+                String(
+                  Math.max(
+                    0,
+                    ...sheet.rowIds.map((rowId) =>
+                      /^[1-9]\d*$/.test(rowId) ? Number(rowId) : 0,
+                    ),
+                  ) + 1,
+                ),
               ],
               rows: [...sheet.rows, sheet.columns.map(() => "")],
             },
