@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ViewTransition } from "react";
 import { Icons } from "@/components/icons";
 import { Logo } from "@/components/logo";
+import { ProfileMenu } from "@/components/profile-menu";
 import { currentUser } from "@/lib/auth";
 
 const nav = [
@@ -26,7 +27,7 @@ export async function AppShell({ children, active, compact = false }: { children
           </nav>
           <div className="sidebar-bottom">
             <Link href="/settings" className={active === "settings" ? "active" : ""} aria-label="설정" title="설정"><Icons.settings /><span>설정</span></Link>
-            {user ? <Link href="/settings" className="profile-row" aria-label={`${user.name} 프로필`} title={`${user.name} 프로필`}><span className="avatar">{user.name.slice(0, 1)}</span><span><strong>{user.name}</strong><small>@{user.username}</small></span><Icons.more /></Link> : <div className="sidebar-auth-links"><Link href="/login" aria-label="로그인" title="로그인"><Icons.logIn /><span>로그인</span></Link><Link href="/signup" aria-label="회원가입" title="회원가입"><Icons.userPlus /><span>회원가입</span></Link></div>}
+            {user ? <ProfileMenu name={user.name} username={user.username} /> : <div className="sidebar-auth-links"><Link href="/login" aria-label="로그인" title="로그인"><Icons.logIn /><span>로그인</span></Link><Link href="/signup" aria-label="회원가입" title="회원가입"><Icons.userPlus /><span>회원가입</span></Link></div>}
           </div>
         </aside>
       </ViewTransition>

@@ -1175,7 +1175,10 @@ svg {
   border-top: 1px solid var(--line);
   padding: 12px 14px 16px;
 }
-.sidebar-bottom > a.profile-row {
+.profile-menu {
+  position: relative;
+}
+.sidebar-bottom .profile-row {
   width: 100%;
   height: auto;
   min-height: 54px;
@@ -1189,6 +1192,52 @@ svg {
   text-align: left;
   padding: 9px 14px;
   border-radius: 10px;
+}
+.profile-row {
+  cursor: pointer;
+}
+.profile-popover {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 14px 34px color-mix(in srgb, var(--green) 16%, transparent);
+}
+.profile-popover > button {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #ad5050;
+  font-size: 12px;
+  font-weight: 700;
+}
+.profile-popover > button:hover,
+.profile-popover > button:focus-visible {
+  background: #faeaea;
+}
+.profile-popover > button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.profile-popover svg {
+  width: 16px;
+}
+.profile-popover p {
+  margin: 5px 8px 3px;
+  color: #ad5050;
+  font-size: 9px;
+  line-height: 1.45;
 }
 .profile-row > span:nth-child(2) {
   min-width: 0;
@@ -1346,7 +1395,7 @@ svg {
   width: 16px;
   height: 16px;
 }
-.compact-shell .sidebar-bottom > a.profile-row {
+.compact-shell .sidebar-bottom .profile-row {
   display: flex;
   width: 40px;
   height: 40px;
@@ -1357,8 +1406,13 @@ svg {
   border-radius: 50%;
   background: transparent;
 }
-.compact-shell .sidebar-bottom > a.profile-row:hover {
+.compact-shell .sidebar-bottom .profile-row:hover {
   background: transparent;
+}
+.compact-shell .profile-popover {
+  left: 0;
+  right: auto;
+  width: 132px;
 }
 .compact-shell .profile-row .avatar {
   display: grid;
@@ -2968,14 +3022,14 @@ svg {
     display: flex;
     justify-content: center;
   }
-  .sidebar-bottom > a.profile-row {
+  .sidebar-bottom .profile-row {
     width: 44px;
     min-height: 44px;
     margin-inline: auto;
     padding: 0;
     border-radius: 50%;
   }
-  .sidebar-bottom > a.profile-row .avatar {
+  .sidebar-bottom .profile-row .avatar {
     display: grid;
   }
   .sidebar-auth-links {
