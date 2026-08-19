@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { requestHasProjectAccess } from "@/lib/project-security";
+import { requestHasOwnedProjectAccess } from "@/lib/auth";
 
 export async function GET(
   request: Request,
@@ -8,10 +8,10 @@ export async function GET(
   const { id } = await context.params;
   const project = await prisma.project.findFirst({
     where: { id, deletedAt: null },
-    select: { id: true, passwordHash: true },
+    select: { id: true, passwordHash: true, ownerId: true },
   });
   if (!project) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!requestHasProjectAccess(request, id, project.passwordHash))
+  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const sheets = await prisma.projectSheet.findMany({

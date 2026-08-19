@@ -10,7 +10,8 @@ if (!connectionString)
 const args = process.argv.slice(2);
 const projectId =
   args.find((argument) => argument.startsWith("--project="))?.split("=")[1] ??
-  "demo";
+  process.env.APORIA_PROJECT_ID ??
+  "";
 const execute = args.includes("--execute");
 const numericPattern = "^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$";
 
@@ -43,6 +44,8 @@ function metadataHash(columns: RegisteredColumn[]) {
 }
 
 async function main() {
+  if (!projectId)
+    throw new Error("--project=<UUID> 또는 APORIA_PROJECT_ID가 필요합니다.");
   const client = new pg.Client({ connectionString });
   await client.connect();
   try {

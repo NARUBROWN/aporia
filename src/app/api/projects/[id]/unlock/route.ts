@@ -4,8 +4,9 @@ import { isValidPin, projectAccessCookieName, projectAccessToken, verifyPin } fr
 export async function POST(request: Request, context: RouteContext<"/api/projects/[id]/unlock">) {
   const { id } = await context.params;
   const body = await request.json().catch(() => null) as { pin?: unknown } | null;
-  const project = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  const project = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true, ownerId: true } });
   if (!project) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (project.ownerId) return Response.json({ error: "PROJECT_OWNED" }, { status: 403 });
   if (!project.passwordHash || !isValidPin(body?.pin) || !verifyPin(body.pin, project.passwordHash))
     return Response.json({ error: "INVALID_PIN" }, { status: 401 });
   const response = Response.json({ ok: true });

@@ -16,12 +16,46 @@ model Project {
   deletedAt    DateTime?         @map("deleted_at") @db.Timestamptz(6)
   createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  ownerId      String?           @map("owner_id") @db.Uuid
+  owner        User?             @relation(fields: [ownerId], references: [id], onDelete: SetNull)
   snapshots    ProjectSnapshot[]
   sheets       ProjectSheet[]
   seedBatches  SeedBatch[]
 
   @@index([deletedAt])
+  @@index([ownerId])
   @@map("projects")
+}
+
+model User {
+  id           String        @id @db.Uuid
+  username     String        @unique @db.Text
+  name         String        @db.Text
+  passwordHash String        @map("password_hash") @db.Text
+  deletedAt    DateTime?     @map("deleted_at") @db.Timestamptz(6)
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  termsAgreedAt   DateTime   @map("terms_agreed_at") @db.Timestamptz(6)
+  privacyAgreedAt DateTime   @map("privacy_agreed_at") @db.Timestamptz(6)
+  termsVersion    String     @map("terms_version") @db.Text
+  privacyVersion  String     @map("privacy_version") @db.Text
+  sessions     AuthSession[]
+  projects     Project[]
+
+  @@index([deletedAt])
+  @@map("users")
+}
+
+model AuthSession {
+  id        String   @id @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash") @db.Text
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("auth_sessions")
 }
 
 model ProjectSheet {

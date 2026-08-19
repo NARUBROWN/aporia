@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { Icons } from "@/components/icons";
+import { Logo } from "@/components/logo";
+import { currentUser } from "@/lib/auth";
 
 const nav = [
   { href: "/", label: "홈", icon: Icons.home },
@@ -7,17 +9,9 @@ const nav = [
   { href: "/playground", label: "플레이그라운드", icon: Icons.blocks },
 ];
 
-export function Logo() {
-  return (
-    <Link href="/" className="logo" aria-label="Aporia 홈">
-      <span className="logo-mark"><span /><span /><span /></span>
-      <span>aporia</span>
-    </Link>
-  );
-}
-
-export function AppShell({ children, active, compact = false }: { children: React.ReactNode; active: "home" | "projects" | "playground" | "settings"; compact?: boolean }) {
+export async function AppShell({ children, active, compact = false }: { children: React.ReactNode; active: "home" | "projects" | "playground" | "settings"; compact?: boolean }) {
   const activePath = active === "home" ? "/" : `/${active}`;
+  const user = await currentUser();
   return (
     <div className={`app-frame ${compact ? "compact-shell" : ""}`}>
       <aside className="sidebar">
@@ -30,7 +24,7 @@ export function AppShell({ children, active, compact = false }: { children: Reac
         </nav>
         <div className="sidebar-bottom">
           <Link href="/settings" className={active === "settings" ? "active" : ""}><Icons.settings /><span>설정</span></Link>
-          <button className="profile-row" type="button"><span className="avatar">김</span><span><strong>김원정</strong><small>워크스페이스 관리자</small></span><Icons.more /></button>
+          {user ? <Link href="/settings" className="profile-row"><span className="avatar">{user.name.slice(0, 1)}</span><span><strong>{user.name}</strong><small>@{user.username}</small></span><Icons.more /></Link> : <div className="sidebar-auth-links"><Link href="/login">로그인</Link><Link href="/signup">회원가입</Link></div>}
         </div>
       </aside>
       <div className="app-main">{children}</div>

@@ -4,24 +4,26 @@ import { Icons } from "@/components/icons";
 import { ProjectCards } from "@/components/project-list";
 import { prisma } from "@/lib/prisma";
 import { toProjectListItem } from "@/lib/projects";
+import { currentUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
+  const user = await currentUser();
   const today = new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul",
     year: "numeric",
     month: "long",
     day: "numeric",
   }).format(new Date());
-  const projects = (await prisma.project.findMany({ where: { deletedAt: null }, orderBy: { updatedAt: "desc" }, take: 3 })).map(toProjectListItem);
+  const projects = user ? (await prisma.project.findMany({ where: { deletedAt: null, ownerId: user.id }, orderBy: { updatedAt: "desc" }, take: 3 })).map(toProjectListItem) : [];
   return (
     <AppShell active="home">
       <Topbar title="홈" actions={<><button className="icon-button" aria-label="검색"><Icons.search /></button><Link className="button primary small" href="/projects/new"><Icons.plus />새 프로젝트</Link></>} />
       <main className="page-content dashboard">
         <section className="welcome-row">
           <div><span className="eyebrow">{today}</span><h2>안녕하세요</h2><p>아이디어를 눈에 보이는 시스템으로 만들어보세요.</p></div>
-          <div className="mini-stat"><span className="stat-icon"><Icons.bolt /></span><div><strong>{await prisma.project.count({ where: { deletedAt: null } })}</strong><small>진행 중인 프로젝트</small></div></div>
+          <div className="mini-stat"><span className="stat-icon"><Icons.bolt /></span><div><strong>{user ? await prisma.project.count({ where: { deletedAt: null, ownerId: user.id } }) : 0}</strong><small>진행 중인 프로젝트</small></div></div>
         </section>
 
         <section className="quick-start">

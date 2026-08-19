@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { postgres, quoteRegisteredIdentifier } from "@/lib/postgres";
-import { requestHasProjectAccess } from "@/lib/project-security";
+import { requestHasOwnedProjectAccess } from "@/lib/auth";
 import {
   normalizeStoredColumnType,
   validateSheetValue,
@@ -13,10 +13,10 @@ export async function GET(
   const { id, sheetId } = await context.params;
   const project = await prisma.project.findFirst({
     where: { id, deletedAt: null },
-    select: { passwordHash: true },
+    select: { passwordHash: true, ownerId: true },
   });
   if (!project) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!requestHasProjectAccess(request, id, project.passwordHash))
+  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const sheet = await prisma.projectSheet.findFirst({
@@ -65,11 +65,11 @@ export async function PATCH(
   const { id, sheetId } = await context.params;
   const project = await prisma.project.findFirst({
     where: { id, deletedAt: null },
-    select: { passwordHash: true },
+    select: { passwordHash: true, ownerId: true },
   });
   if (!project)
     return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!requestHasProjectAccess(request, id, project.passwordHash))
+  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const sheet = await prisma.projectSheet.findFirst({

@@ -1,6 +1,7 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
-import { isValidPin, requestHasProjectAccess, verifyPin } from "@/lib/project-security";
+import { isValidPin, verifyPin } from "@/lib/project-security";
+import { requestHasOwnedProjectAccess } from "@/lib/auth";
 
 type DocumentRecord = Record<string, unknown>;
 
@@ -70,7 +71,7 @@ export async function GET(
   if (!project) {
     return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
   }
-  if (!requestHasProjectAccess(_request, id, project.passwordHash))
+  if (!await requestHasOwnedProjectAccess(_request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   return Response.json(
     {
@@ -92,9 +93,9 @@ export async function PUT(
   context: RouteContext<"/api/projects/[id]">,
 ) {
   const { id } = await context.params;
-  const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true, ownerId: true } });
   if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (existing?.passwordHash && !requestHasProjectAccess(request, id, existing.passwordHash))
+  if (!await requestHasOwnedProjectAccess(request, id, existing.ownerId, existing.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   const raw = await request.text();
 
@@ -177,8 +178,10 @@ export async function PUT(
 
 export async function DELETE(request: Request, context: RouteContext<"/api/projects/[id]">) {
   const { id } = await context.params;
-  const project = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  const project = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true, ownerId: true } });
   if (!project) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   if (project.passwordHash) {
     const body = await request.json().catch(() => null) as { pin?: unknown } | null;
     if (!isValidPin(body?.pin) || !verifyPin(body.pin, project.passwordHash))

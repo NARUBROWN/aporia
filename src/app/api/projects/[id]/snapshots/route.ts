@@ -1,6 +1,6 @@
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
-import { requestHasProjectAccess } from "@/lib/project-security";
+import { requestHasOwnedProjectAccess } from "@/lib/auth";
 
 type DocumentRecord = Record<string, unknown>;
 
@@ -25,11 +25,11 @@ export async function GET(
   const { id } = await context.params;
   const project = await prisma.project.findFirst({
     where: { id, deletedAt: null },
-    select: { id: true, passwordHash: true },
+    select: { id: true, passwordHash: true, ownerId: true },
   });
   if (!project)
     return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!requestHasProjectAccess(_request, id, project.passwordHash))
+  if (!await requestHasOwnedProjectAccess(_request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
 
   const snapshots = await prisma.projectSnapshot.findMany({
@@ -54,9 +54,9 @@ export async function POST(
   context: RouteContext<"/api/projects/[id]/snapshots">,
 ) {
   const { id } = await context.params;
-  const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true } });
+  const existing = await prisma.project.findFirst({ where: { id, deletedAt: null }, select: { passwordHash: true, ownerId: true } });
   if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
-  if (!requestHasProjectAccess(request, id, existing.passwordHash))
+  if (!await requestHasOwnedProjectAccess(request, id, existing.ownerId, existing.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
   const raw = await request.text();
   if (raw.length > 5_000_000)

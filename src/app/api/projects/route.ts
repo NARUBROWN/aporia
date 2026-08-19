@@ -1,9 +1,12 @@
 import { prisma } from "@/lib/prisma";
 import { emptyProjectDocument, toProjectListItem } from "@/lib/projects";
+import { authenticatedUserFromRequest } from "@/lib/auth";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const user = await authenticatedUserFromRequest(request);
+  if (!user) return Response.json({ error: "UNAUTHORIZED" }, { status: 401 });
   const projects = await prisma.project.findMany({
-    where: { deletedAt: null },
+    where: { deletedAt: null, ownerId: user.id },
     orderBy: { updatedAt: "desc" },
   });
   return Response.json(
@@ -13,6 +16,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const user = await authenticatedUserFromRequest(request);
+  if (!user) return Response.json({ error: "UNAUTHORIZED" }, { status: 401 });
   let body: unknown;
   try {
     body = await request.json();
@@ -32,6 +37,7 @@ export async function POST(request: Request) {
   const project = await prisma.project.create({
     data: {
       id: crypto.randomUUID(),
+      ownerId: user.id,
       name,
       document: emptyProjectDocument(description),
     },

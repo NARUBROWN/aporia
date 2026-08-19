@@ -1090,7 +1090,11 @@ const sheetRelations = [
 ];
 
 async function main() {
-  const current = await prisma.project.findUnique({ where: { id: "demo" } });
+  const current = await prisma.project.findFirst({
+    where: { name: "LCA 데이터 정제", deletedAt: null },
+    orderBy: { updatedAt: "desc" },
+  });
+  const projectId = current?.id ?? crypto.randomUUID();
   const currentDocument =
     current?.document &&
     typeof current.document === "object" &&
@@ -1116,14 +1120,14 @@ async function main() {
   };
 
   await prisma.project.upsert({
-    where: { id: "demo" },
+    where: { id: projectId },
     update: {
       name: "LCA 데이터 정제",
       document,
       version: { increment: 1 },
     },
     create: {
-      id: "demo",
+      id: projectId,
       name: "LCA 데이터 정제",
       document,
     },

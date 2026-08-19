@@ -55,7 +55,10 @@ if (!connectionString) throw new Error("DIRECT_URL 또는 DATABASE_URL이 필요
 const args = process.argv.slice(2);
 const zipArg = args.find((arg) => !arg.startsWith("--"));
 const zipPath = zipArg ? resolve(zipArg) : "";
-const projectId = args.find((arg) => arg.startsWith("--project="))?.split("=")[1] || "demo";
+const projectId =
+  args.find((arg) => arg.startsWith("--project="))?.split("=")[1] ||
+  process.env.APORIA_PROJECT_ID ||
+  "";
 const execute = args.includes("--execute");
 const maxTables = Number(args.find((arg) => arg.startsWith("--max-tables="))?.split("=")[1] || 0);
 const maxRows = Number(args.find((arg) => arg.startsWith("--max-rows="))?.split("=")[1] || 0);
@@ -483,6 +486,8 @@ async function importTable(client: pg.PoolClient, batchId: string, table: Source
 }
 
 async function main() {
+  if (!projectId)
+    throw new Error("--project=<UUID> 또는 APORIA_PROJECT_ID가 필요합니다.");
   if (!zipPath) throw new Error("사용법: npm run db:seed:lca -- <zip> --execute [--project=demo]");
   const tables = discoverTables();
   const selectedTables = maxTables > 0 ? tables.slice(0, maxTables) : tables;

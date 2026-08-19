@@ -47,6 +47,85 @@ svg {
   width: 20px;
   height: 20px;
 }
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background: #eef3ef;
+}
+.auth-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 17px;
+  padding: 34px;
+  border: 1px solid #dce5df;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 24px 70px #21402c16;
+}
+.auth-card > span { color: #5c896f; font-size: 11px; font-weight: 800; letter-spacing: .12em; }
+.auth-card h1 { margin: -8px 0 5px; font-size: 27px; }
+.auth-card label, .account-delete-confirm label { display: grid; gap: 7px; font-size: 12px; font-weight: 700; }
+.auth-card input, .account-delete-confirm input { width: 100%; height: 44px; padding: 0 13px; border: 1px solid #d8e1db; border-radius: 9px; background: #fff; }
+.auth-card label small { color: #8a968e; font-size: 10px; font-weight: 400; }
+.auth-card > p { margin: 0; color: #7a877f; font-size: 11px; text-align: center; }
+.auth-card > p a { color: #28714f; font-weight: 800; }
+.auth-error { color: #b23b3b !important; font-size: 11px !important; text-align: left !important; }
+.signup-consents { min-width: 0; margin: 2px 0 0; padding: 15px; display: grid; gap: 11px; border: 1px solid #dce5df; border-radius: 11px; }
+.signup-consents legend { padding: 0 6px; color: #426350; font-size: 11px; font-weight: 800; }
+.auth-card .signup-consents label { display: flex; align-items: flex-start; gap: 9px; font-weight: 500; line-height: 1.45; }
+.auth-card .signup-consents input { flex: 0 0 auto; width: 16px; height: 16px; margin: 1px 0 0; padding: 0; accent-color: #28714f; }
+.signup-consents a { color: #28714f; font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
+.signup-consents > small { color: #7b8880; font-size: 10px; line-height: 1.5; }
+.legal-page { min-height: 100vh; background: #f7f9f7; }
+.legal-page > header { position: sticky; top: 0; z-index: 2; height: 68px; padding: 0 max(24px, calc((100vw - 920px) / 2)); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8e4; background: #ffffffee; backdrop-filter: blur(12px); }
+.legal-page > header nav { display: flex; gap: 20px; color: #5f6f65; font-size: 13px; }
+.legal-page > header nav a:hover { color: #28714f; }
+.legal-page article { width: min(920px, calc(100% - 40px)); margin: 0 auto; padding: 64px 0 70px; }
+.legal-page article > span { color: #668171; font-size: 12px; font-weight: 700; }
+.legal-page h1 { margin: 10px 0 30px; font-size: clamp(30px, 5vw, 44px); letter-spacing: -.04em; }
+.legal-page section { padding: 27px 0; border-top: 1px solid #e2e8e4; }
+.legal-page section h2 { margin: 0 0 13px; font-size: 18px; }
+.legal-page section p, .legal-page section li { color: #536158; font-size: 14px; line-height: 1.8; }
+.legal-page section p { margin: 8px 0 0; }
+.legal-page section a { color: #28714f; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+.legal-page section code { padding: 2px 5px; border-radius: 4px; background: #eef4f0; color: #365d48; font-size: .92em; }
+.legal-page section ul { margin: 8px 0 0; padding-left: 21px; }
+.legal-page mark { padding: 2px 4px; border-radius: 4px; background: #fff0b9; color: #5f4b00; }
+.legal-page table { width: 100%; margin: 14px 0; border-collapse: collapse; font-size: 13px; }
+.legal-page th, .legal-page td { padding: 12px 14px; border: 1px solid #dfe6e1; text-align: left; vertical-align: top; line-height: 1.6; }
+.legal-page th { background: #eef4f0; color: #365d48; }
+.legal-page > footer { padding: 24px; border-top: 1px solid #e2e8e4; background: #fff; color: #28714f; font-size: 13px; font-weight: 800; text-align: center; }
+@media (max-width: 640px) {
+  .auth-page { padding: 20px; }
+  .auth-card { padding: 26px 22px; }
+  .legal-page > header { height: auto; padding: 18px 20px; align-items: flex-start; gap: 14px; }
+  .legal-page > header nav { gap: 12px; font-size: 11px; }
+  .legal-page article { width: min(100% - 32px, 920px); padding-top: 42px; }
+  .legal-page table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+.sidebar-auth-links { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; }
+.sidebar-auth-links a { padding: 8px 6px; border: 1px solid #dce5df; border-radius: 7px; color: #426350; font-size: 10px; text-align: center; }
+.danger-zone { border-color: #efd5d5 !important; }
+.danger-zone h2 { color: #9f3030; }
+.account-delete-confirm { display: grid; gap: 12px; }
+.account-delete-confirm > div { display: flex; justify-content: flex-end; gap: 8px; }
+.onboarding-page { min-height: 100vh; display: grid; place-items: center; padding: 42px; background: #eef3ef; }
+.onboarding-card { width: min(720px, 100%); padding: 36px; border: 1px solid #dce5df; border-radius: 18px; background: #fff; box-shadow: 0 24px 70px #21402c16; }
+.onboarding-card > span { color: #3b7d5b; font-size: 10px; font-weight: 900; letter-spacing: .15em; }
+.onboarding-card h1 { margin: 9px 0 6px; font-size: 26px; }
+.onboarding-card > p { margin: 0 0 24px; color: #7e8a82; font-size: 12px; }
+.onboarding-empty { padding: 30px; border: 1px dashed #cfdad3; border-radius: 12px; color: #7d8981; font-size: 12px; text-align: center; }
+.claim-project-list { display: grid; gap: 10px; }
+.claim-project-list article { display: grid; grid-template-columns: minmax(0, 1fr) 150px 94px; align-items: center; gap: 10px; padding: 14px; border: 1px solid #dfe6e1; border-radius: 11px; }
+.claim-project-list article > div { display: grid; gap: 4px; }
+.claim-project-list strong { font-size: 13px; }
+.claim-project-list small { color: #859189; font-size: 9px; }
+.claim-project-list input { height: 36px; padding: 0 10px; border: 1px solid #d7e0da; border-radius: 8px; }
+.claim-project-list article > p { grid-column: 1 / -1; margin: 0; color: #b13b3b; font-size: 10px; }
+.onboarding-actions { display: flex; justify-content: flex-end; margin-top: 24px; }
 .pin-gate {
   min-height: 100vh;
   display: grid;
