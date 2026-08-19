@@ -20,10 +20,17 @@ npm run dev
 ```dotenv
 # 앱 런타임: Supabase Transaction pooler 연결 문자열
 DATABASE_URL="postgresql://...:6543/postgres"
+DATABASE_POOL_SIZE="2"
+DATABASE_IDLE_TIMEOUT_MS="5000"
 
 # Prisma 마이그레이션: Supabase Direct connection 연결 문자열
 DIRECT_URL="postgresql://...:5432/postgres"
 ```
+
+`DATABASE_POOL_SIZE`는 Vercel Function 인스턴스별 연결 수입니다. 저사양
+Supabase에서는 2로 시작하고, 실제 연결 대기 지표를 확인한 뒤에만 늘리세요.
+유휴 연결은 기본 5초 뒤 정리하며, Vercel에서는 Fluid Compute의 풀 수명 관리도
+함께 적용됩니다.
 
 두 연결 문자열은 Supabase 프로젝트의 **Connect** 화면에서 복사할 수 있습니다. 비밀번호에 특수 문자가 있으면 URL 인코딩된 연결 문자열을 사용하세요.
 
@@ -63,8 +70,11 @@ docker compose down
 - `projects` 테이블의 `document` JSONB에 편집 문서 저장
 - 화면 컴포넌트, 데이터 시트, 내부 행 식별자, 다중 시트 연결 설정 포함
 - 편집 후 700ms 단위로 자동 저장
+- 동일한 문서 payload는 다시 저장하지 않으며 저장 요청은 브라우저 탭 안에서 순차 처리
+- 프로젝트 버전 기반 낙관적 잠금으로 오래된 문서의 덮어쓰기 차단
 - 문서 저장마다 `version` 증가
 - API 문서 크기 제한 5MB
+- 스냅샷은 bulk insert로 저장하고 자동 삭제하지 않음
 
 Prisma 스키마와 마이그레이션은 [prisma](prisma), 로컬 PostgreSQL 구성은 [compose.yaml](compose.yaml)에 있습니다.
 

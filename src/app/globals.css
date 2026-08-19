@@ -16,6 +16,111 @@
   --shadow: 0 16px 40px rgba(55, 45, 105, 0.1);
 }
 
+/* Keep late, light-only studio rules from overriding the midnight palette. */
+.app-frame[data-theme="midnight"] :is(.search-field, .palette-search),
+.app-frame[data-theme="midnight"] .component-groups button,
+.app-frame[data-theme="midnight"] .canvas-toolbar > span,
+.app-frame[data-theme="midnight"] .canvas-toolbar > div,
+.app-frame[data-theme="midnight"] .workspace-bar > div:last-child,
+.app-frame[data-theme="midnight"] .browser-chrome span,
+.app-frame[data-theme="midnight"] .sheet-search-popover,
+.app-frame[data-theme="midnight"] .page-switcher .page-name-input,
+.app-frame[data-theme="midnight"] .sheet-tab.active,
+.app-frame[data-theme="midnight"] .sheet-tabs > button.active,
+.app-frame[data-theme="midnight"] .sheet-tabs > .add-sheet,
+.app-frame[data-theme="midnight"] .sheet-tabs > .delete-sheet-tab,
+.app-frame[data-theme="midnight"] .sheet-view-toggle button.active,
+.app-frame[data-theme="midnight"] .sheet-tab-name-editor input {
+  background: var(--paper);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.app-frame[data-theme="midnight"] .component-groups button:hover {
+  background: color-mix(in srgb, var(--paper) 72%, var(--soft));
+}
+
+.app-frame[data-theme="midnight"] .sheet-tabs > .delete-sheet-tab {
+  color: #f29a9a;
+}
+
+.app-frame[data-theme="midnight"] .sheet-tabs > .delete-sheet-tab:hover,
+.app-frame[data-theme="midnight"] .page-switcher .page-tab-close:hover {
+  background: #3a2028 !important;
+  color: #ffaaaa;
+}
+
+.app-frame[data-theme="midnight"] .mobile-blocked-screen {
+  background: var(--paper);
+}
+
+.app-frame[data-theme="midnight"] .mini-stat,
+.app-frame[data-theme="midnight"] .flow-node {
+  background: var(--paper);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.app-frame[data-theme="midnight"] .quick-copy .pill {
+  background: rgba(255, 255, 255, 0.14);
+  color: #f4f2ff;
+}
+
+.app-frame[data-theme="midnight"] .quick-copy p {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.app-frame[data-theme="midnight"] .button.light {
+  background: #171f31;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #b8abff;
+}
+
+.app-frame[data-theme="midnight"] .flow-node :is(small, em) {
+  color: var(--muted);
+}
+
+.app-frame[data-theme="midnight"] .node-form > span {
+  background: #292442;
+  color: #b8abff;
+}
+
+.app-frame[data-theme="midnight"] .node-action > span {
+  background: #3a2a1d;
+  color: #f0ac65;
+}
+
+.app-frame[data-theme="midnight"] .node-data > span {
+  background: var(--soft);
+  color: #a99af2;
+}
+
+.app-frame[data-theme="midnight"] .project-thumb {
+  background-image: radial-gradient(
+    rgba(184, 171, 255, 0.3) 1px,
+    transparent 1px
+  );
+}
+
+.app-frame[data-theme="midnight"] .project-thumb.violet {
+  background-color: #292442;
+  color: #b8abff;
+}
+
+.app-frame[data-theme="midnight"] .project-thumb.mint {
+  background-color: #18352f;
+  color: #7ed7b4;
+}
+
+.app-frame[data-theme="midnight"] .project-thumb.orange {
+  background-color: #3a2a1d;
+  color: #f0ac65;
+}
+
+.app-frame[data-theme="midnight"] .project-thumb > span {
+  background: rgba(17, 24, 39, 0.9);
+}
+
 .project-access-badge {
   display: inline-flex;
   margin-left: 8px;
@@ -215,6 +320,87 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Dark theme surfaces. Kept scoped so the existing light palettes are unchanged. */
+.app-frame[data-theme="midnight"],
+.app-frame[data-theme="midnight"] .app-main,
+.app-frame[data-theme="midnight"] .page-content,
+.app-frame[data-theme="midnight"] .studio,
+.app-frame[data-theme="midnight"] .ui-studio {
+  background: var(--page-bg);
+  color: var(--ink);
+}
+.app-frame[data-theme="midnight"] :is(
+  .sidebar,
+  .topbar,
+  .settings-card,
+  .project-card,
+  .project-list-item,
+  .empty-create,
+  .studio-topbar,
+  .ui-palette,
+  .ui-properties,
+  .sheet-dock,
+  .sheet-tabs,
+  .sheet-grid-wrap,
+  .relation-modal,
+  .relation-modal > header,
+  .relation-modal > footer,
+  .security-dialog,
+  .member-search-results,
+  .profile-popover
+) {
+  background: var(--paper);
+  color: var(--ink);
+}
+.app-frame[data-theme="midnight"] :is(
+  .ui-workspace,
+  .sheet-footer,
+  .empty-sheet-state,
+  .sheet-grid thead th,
+  .sheet-grid .row-number,
+  .theme-swatches,
+  .member-avatar,
+  .saved
+) {
+  background: var(--soft);
+}
+.app-frame[data-theme="midnight"] :is(input, textarea, select) {
+  border-color: var(--line);
+  background-color: var(--paper);
+  color: var(--ink);
+}
+.app-frame[data-theme="midnight"] :is(input, textarea)::placeholder {
+  color: #758199;
+}
+.app-frame[data-theme="midnight"] :is(.button.secondary, .sheet-view-toggle, .project-history-actions) {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--ink);
+}
+.app-frame[data-theme="midnight"] :is(.member-row, .theme-option, .project-card, .project-list-item) {
+  border-color: var(--line);
+}
+.app-frame[data-theme="midnight"] .member-search-results > button:hover,
+.app-frame[data-theme="midnight"] .member-search-results > button:focus-visible {
+  background: var(--soft);
+}
+.app-frame[data-theme="midnight"] .sheet-loading-skeleton {
+  background: var(--paper);
+}
+.app-frame[data-theme="midnight"] .web-canvas {
+  background: #141d2d;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.32);
+}
+.app-frame[data-theme="midnight"] .browser-bar,
+.app-frame[data-theme="midnight"] .canvas-ui-item {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--ink);
+}
+.app-frame[data-theme="midnight"] .relation-modal-backdrop {
+  background: rgba(3, 7, 18, 0.72);
+}
 .app-frame[data-theme="navy-lime"] {
   --ink: #18202c;
   --muted: #758092;
@@ -242,6 +428,22 @@
   --hero-end: #36745a;
   --page-bg: #f7f8f6;
   --shadow: 0 16px 40px rgba(28, 52, 39, 0.08);
+}
+.app-frame[data-theme="midnight"] {
+  --ink: #edf1fa;
+  --muted: #9aa6bb;
+  --line: #344158;
+  --paper: #111827;
+  --soft: #1b2638;
+  --green: #8b7cf6;
+  --green-2: #a3e635;
+  --accent-text: #c4b5fd;
+  --lime: #a3e635;
+  --hero-start: #312e81;
+  --hero-end: #6d5fd0;
+  --page-bg: #0b1020;
+  --shadow: 0 18px 46px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
 }
 * {
   box-sizing: border-box;
@@ -1511,17 +1713,9 @@ svg {
   grid-template-rows: calc(100vh - 44px) 44px;
   width: 100vw;
   min-height: 100vh;
-  animation: shell-collapse 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-@keyframes shell-collapse {
-  from {
-    grid-template-columns: 238px 1fr;
-  }
-  to {
-    grid-template-columns: 72px 1fr;
-  }
 }
 .compact-shell .app-footer {
+  grid-column: 2;
   min-height: 0;
   height: 44px;
   padding: 0 18px;
@@ -1537,18 +1731,10 @@ svg {
   height: 100%;
 }
 .compact-shell .sidebar {
+  grid-row: 1 / 3;
   width: 72px;
   min-height: 0;
-  height: 100%;
-  animation: sidebar-collapse 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-@keyframes sidebar-collapse {
-  from {
-    width: 238px;
-  }
-  to {
-    width: 72px;
-  }
+  height: 100vh;
 }
 .compact-shell .sidebar-top {
   padding: 0;
@@ -1568,6 +1754,11 @@ svg {
 .compact-shell .sidebar-bottom > a {
   justify-content: center;
   padding: 0;
+  transition: none;
+}
+.compact-shell .side-nav a:active,
+.compact-shell .sidebar-bottom > a:active {
+  transform: none;
 }
 .compact-shell .side-nav a svg,
 .compact-shell .sidebar-bottom > a svg {
@@ -2494,7 +2685,7 @@ svg {
 }
 .theme-options {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 10px;
 }
 .theme-option {
@@ -3194,10 +3385,10 @@ svg {
 
 @media (min-width: 761px) and (max-width: 1280px) {
   .app-frame:not(.compact-shell) {
-    grid-template-columns: 78px 1fr;
+    grid-template-columns: 72px 1fr;
   }
   .app-frame:not(.compact-shell) .sidebar {
-    width: 78px;
+    width: 72px;
   }
   .sidebar-top {
     padding: 0;
@@ -3217,7 +3408,7 @@ svg {
   }
   .side-nav,
   .sidebar-bottom {
-    padding-inline: 10px;
+    padding-inline: 9px;
   }
   .profile-row {
     display: flex;
@@ -3227,8 +3418,8 @@ svg {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 44px;
-    min-height: 44px;
+    width: 40px;
+    min-height: 40px;
     margin-inline: auto;
     padding: 0;
     border-radius: 50%;

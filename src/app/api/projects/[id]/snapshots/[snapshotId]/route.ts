@@ -23,12 +23,25 @@ export async function POST(
   if (!existing) return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
   if (!await requestHasProjectWriteAccess(request, id, existing.ownerId, existing.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
+  const body = (await request.json().catch(() => ({}))) as { baseVersion?: unknown };
+  const baseVersion = typeof body.baseVersion === "number" ? body.baseVersion : undefined;
+  if (
+    "baseVersion" in body &&
+    (!Number.isSafeInteger(baseVersion) || (baseVersion ?? 0) < 1)
+  )
+    return Response.json({ error: "INVALID_BASE_VERSION" }, { status: 400 });
 
   let result;
   try {
     result = await prisma.$transaction(async (transaction) => {
-      const project = await transaction.project.findFirst({ where: { id, deletedAt: null } });
-      if (!project) return { error: "PROJECT_NOT_FOUND" as const };
+      const project = await transaction.project.findFirst({
+        where: {
+          id,
+          deletedAt: null,
+          ...(baseVersion === undefined ? {} : { version: BigInt(baseVersion) }),
+        },
+      });
+      if (!project) return { error: "PROJECT_VERSION_CONFLICT" as const };
       const selected = await transaction.projectSnapshot.findFirst({
         where: { id: snapshotId, projectId: id },
       });
@@ -65,7 +78,14 @@ export async function POST(
   if ("error" in result)
     return Response.json(
       { error: result.error },
-      { status: result.error === "INVALID_SNAPSHOT" ? 422 : 404 },
+      {
+        status:
+          result.error === "INVALID_SNAPSHOT"
+            ? 422
+            : result.error === "PROJECT_VERSION_CONFLICT"
+              ? 409
+              : 404,
+      },
     );
 
   return Response.json({

@@ -16,21 +16,19 @@ export async function AppShell({ children, active, compact = false }: { children
   const user = await currentUser();
   return (
     <div className={`app-frame ${compact ? "compact-shell" : ""}`} data-theme={user?.theme ?? "indigo-lavender"}>
-      <ViewTransition name="app-sidebar" share="sidebar-morph" default="none">
-        <aside className="sidebar">
-          <div className="sidebar-top"><Logo /></div>
-          <nav className="side-nav" aria-label="주요 메뉴">
-            {nav.map((item) => {
-              const NavIcon = item.icon;
-              return <Link key={item.href} href={item.href} className={activePath === item.href ? "active" : ""} aria-label={item.label} title={item.label}><NavIcon /><span>{item.label}</span></Link>;
-            })}
-          </nav>
-          <div className="sidebar-bottom">
-            <Link href="/settings" className={active === "settings" ? "active" : ""} aria-label="설정" title="설정"><Icons.settings /><span>설정</span></Link>
-            {user ? <ProfileMenu name={user.name} username={user.username} /> : <div className="sidebar-auth-links"><Link href="/login" aria-label="로그인" title="로그인"><Icons.logIn /><span>로그인</span></Link><Link href="/signup" aria-label="회원가입" title="회원가입"><Icons.userPlus /><span>회원가입</span></Link></div>}
-          </div>
-        </aside>
-      </ViewTransition>
+      <aside className="sidebar">
+        <div className="sidebar-top"><Logo /></div>
+        <nav className="side-nav" aria-label="주요 메뉴">
+          {nav.map((item) => {
+            const NavIcon = item.icon;
+            return <Link key={item.href} href={item.href} className={activePath === item.href ? "active" : ""} aria-label={item.label} title={item.label}><NavIcon /><span>{item.label}</span></Link>;
+          })}
+        </nav>
+        <div className="sidebar-bottom">
+          <Link href="/settings" className={active === "settings" ? "active" : ""} aria-label="설정" title="설정"><Icons.settings /><span>설정</span></Link>
+          {user ? <ProfileMenu name={user.name} username={user.username} /> : <div className="sidebar-auth-links"><Link href="/login" aria-label="로그인" title="로그인"><Icons.logIn /><span>로그인</span></Link><Link href="/signup" aria-label="회원가입" title="회원가입"><Icons.userPlus /><span>회원가입</span></Link></div>}
+        </div>
+      </aside>
       <ViewTransition name="app-page" share="page-swap" default="none">
         <div className="app-main">{children}</div>
       </ViewTransition>

@@ -8,8 +8,11 @@ import {
   withoutNormalizedDefinitions,
 } from "@/lib/normalized-definitions";
 import { snapshotNormalizedProject } from "@/lib/normalized-snapshots";
+import { loadProjectSheetMetadata } from "@/lib/project-bootstrap";
 
 type DocumentRecord = Record<string, unknown>;
+
+class ProjectVersionConflictError extends Error {}
 
 function normalizeNumber(value: unknown) {
   if (typeof value === "number")
@@ -68,7 +71,7 @@ function normalizeDocumentNumbers(document: DocumentRecord) {
 }
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: RouteContext<"/api/projects/[id]">,
 ) {
   const { id } = await context.params;
@@ -89,8 +92,12 @@ export async function GET(
   if (!project) {
     return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
   }
-  if (!await requestHasOwnedProjectAccess(_request, id, project.ownerId, project.passwordHash))
+  if (!await requestHasOwnedProjectAccess(request, id, project.ownerId, project.passwordHash))
     return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
+  const includeBootstrap = new URL(request.url).searchParams.get("bootstrap") === "1";
+  const normalizedMetadata = includeBootstrap
+    ? await loadProjectSheetMetadata(id)
+    : undefined;
   return Response.json(
     {
       project: {
@@ -101,9 +108,43 @@ export async function GET(
         version: Number(project.version),
         updatedAt: project.updatedAt.toISOString(),
       },
+      ...(normalizedMetadata ? { normalizedMetadata } : {}),
     },
     { headers: { "Cache-Control": "no-store" } },
   );
+}
+
+export async function PATCH(
+  request: Request,
+  context: RouteContext<"/api/projects/[id]">,
+) {
+  const { id } = await context.params;
+  const existing = await prisma.project.findFirst({
+    where: { id, deletedAt: null },
+    select: { passwordHash: true, ownerId: true },
+  });
+  if (!existing)
+    return Response.json({ error: "PROJECT_NOT_FOUND" }, { status: 404 });
+  if (!await requestHasProjectWriteAccess(request, id, existing.ownerId, existing.passwordHash))
+    return Response.json({ error: "PROJECT_LOCKED" }, { status: 401 });
+
+  const body = (await request.json().catch(() => null)) as { name?: unknown } | null;
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  if (!name || name.length > 120)
+    return Response.json({ error: "INVALID_PROJECT_NAME" }, { status: 400 });
+
+  const project = await prisma.project.update({
+    where: { id },
+    data: { name },
+    select: { id: true, name: true, version: true, updatedAt: true },
+  });
+  return Response.json({
+    project: {
+      ...project,
+      version: Number(project.version),
+      updatedAt: project.updatedAt.toISOString(),
+    },
+  });
 }
 
 export async function PUT(
@@ -151,6 +192,15 @@ export async function PUT(
   }
   const sourceDocument = normalized.document as DocumentRecord;
   const document = withoutNormalizedDefinitions(sourceDocument);
+  const baseVersion =
+    "baseVersion" in body && typeof body.baseVersion === "number"
+      ? body.baseVersion
+      : undefined;
+  if (
+    "baseVersion" in body &&
+    (!Number.isSafeInteger(baseVersion) || (baseVersion ?? 0) < 1)
+  )
+    return Response.json({ error: "INVALID_BASE_VERSION" }, { status: 400 });
   const snapshotReason =
     "snapshotReason" in body && body.snapshotReason === "manual_save"
       ? "manual_save"
@@ -158,41 +208,42 @@ export async function PUT(
   let project;
   try {
     project = await prisma.$transaction(async (transaction) => {
-      await syncDocumentSheets(transaction, id, sourceDocument);
-      await syncNormalizedDefinitions(transaction, id, sourceDocument);
-      if (snapshotReason) {
-        const updated = await transaction.project.update({
-          where: { id },
-          data: {
-            document,
-            version: { increment: 1 },
-            ...(requestedName ? { name: requestedName } : {}),
-          },
-          select: { id: true, name: true, version: true, updatedAt: true },
-        });
-        const snapshot = await transaction.projectSnapshot.create({
-          data: {
-            id: crypto.randomUUID(),
-            projectId: id,
-            document,
-            projectVersion: updated.version,
-            reason: snapshotReason,
-          },
-        });
-        await snapshotNormalizedProject(transaction, snapshot.id, id, sourceDocument);
-        return updated;
-      }
-      return transaction.project.update({
-        where: { id },
+      const updated = await transaction.project.updateMany({
+        where: {
+          id,
+          ...(baseVersion === undefined ? {} : { version: BigInt(baseVersion) }),
+        },
         data: {
           document,
           version: { increment: 1 },
           ...(requestedName ? { name: requestedName } : {}),
         },
+      });
+      if (updated.count !== 1) throw new ProjectVersionConflictError();
+      await syncDocumentSheets(transaction, id, sourceDocument);
+      await syncNormalizedDefinitions(transaction, id, sourceDocument);
+      const savedProject = await transaction.project.findUniqueOrThrow({
+        where: { id },
         select: { id: true, name: true, version: true, updatedAt: true },
       });
+      if (snapshotReason) {
+        const snapshot = await transaction.projectSnapshot.create({
+          data: {
+            id: crypto.randomUUID(),
+            projectId: id,
+            document,
+            projectVersion: savedProject.version,
+            reason: snapshotReason,
+          },
+        });
+        await snapshotNormalizedProject(transaction, snapshot.id, id, sourceDocument);
+        return savedProject;
+      }
+      return savedProject;
     });
   } catch (error) {
+    if (error instanceof ProjectVersionConflictError)
+      return Response.json({ error: "PROJECT_VERSION_CONFLICT" }, { status: 409 });
     if (error instanceof NormalizedDefinitionError)
       return Response.json(
         { error: error.code, message: error.message },

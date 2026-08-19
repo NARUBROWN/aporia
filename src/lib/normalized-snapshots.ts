@@ -21,6 +21,15 @@ function values(value: unknown) {
   return Array.isArray(value) ? value : [];
 }
 
+async function createInChunks<T>(
+  rows: T[],
+  create: (chunk: T[]) => Promise<unknown>,
+) {
+  const chunkSize = 1_000;
+  for (let offset = 0; offset < rows.length; offset += chunkSize)
+    await create(rows.slice(offset, offset + chunkSize));
+}
+
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -98,6 +107,11 @@ export async function normalizeSnapshotDocument(
   await transaction.snapshotSheet.deleteMany({ where: { snapshotId } });
   await transaction.snapshotRelation.deleteMany({ where: { snapshotId } });
   await transaction.snapshotCalculatedField.deleteMany({ where: { snapshotId } });
+
+  const sheetRows: Prisma.SnapshotSheetCreateManyInput[] = [];
+  const columnRows: Prisma.SnapshotColumnCreateManyInput[] = [];
+  const dataRows: Prisma.SnapshotRowCreateManyInput[] = [];
+  const cellRows: Prisma.SnapshotCellCreateManyInput[] = [];
   for (const [sheetOrder, sheet] of records(document.sheets).entries()) {
     const columns = values(sheet.columns).map((value) => text(value));
     const types = values(sheet.columnTypes);
@@ -107,52 +121,77 @@ export async function normalizeSnapshotDocument(
     const comments = record(sheet.columnComments);
     const snapshotSheetId = crypto.randomUUID();
     const columnIds = columns.map(() => crypto.randomUUID());
-    await transaction.snapshotSheet.create({
-      data: {
-        id: snapshotSheetId, snapshotId, originalSheetId: text(sheet.id), name: text(sheet.name),
-        color: text(sheet.color) || null, comment: text(sheet.comment) || null, displayOrder: sheetOrder,
-        columns: { create: columns.map((name, displayOrder) => ({
-          id: columnIds[displayOrder], name, dataType: text(types[displayOrder], "text"), displayOrder,
-          color: text(colors[name]) || null, comment: text(comments[name]) || null,
-        })) },
-      },
+    sheetRows.push({
+      id: snapshotSheetId, snapshotId, originalSheetId: text(sheet.id), name: text(sheet.name),
+      color: text(sheet.color) || null, comment: text(sheet.comment) || null, displayOrder: sheetOrder,
     });
+    columns.forEach((name, displayOrder) => columnRows.push({
+      id: columnIds[displayOrder], snapshotSheetId, name,
+      dataType: text(types[displayOrder], "text"), displayOrder,
+      color: text(colors[name]) || null, comment: text(comments[name]) || null,
+    }));
     for (let rowOrder = 0; rowOrder < rows.length; rowOrder++) {
       const rowId = crypto.randomUUID();
       const row = values(rows[rowOrder]);
-      await transaction.snapshotRow.create({
-        data: {
-          id: rowId, snapshotSheetId, originalRowId: text(rowIds[rowOrder], String(rowOrder + 1)), rowOrder,
-          cells: { create: columnIds.map((columnId, index) => ({
-            columnId, value: row[index] === null || row[index] === undefined ? null : String(row[index]),
-          })) },
-        },
+      dataRows.push({
+        id: rowId, snapshotSheetId,
+        originalRowId: text(rowIds[rowOrder], String(rowOrder + 1)), rowOrder,
       });
+      columnIds.forEach((columnId, index) => cellRows.push({
+        rowId, columnId,
+        value: row[index] === null || row[index] === undefined ? null : String(row[index]),
+      }));
     }
   }
+
+  await createInChunks(sheetRows, (data) => transaction.snapshotSheet.createMany({ data }));
+  await createInChunks(columnRows, (data) => transaction.snapshotColumn.createMany({ data }));
+  await createInChunks(dataRows, (data) => transaction.snapshotRow.createMany({ data }));
+  await createInChunks(cellRows, (data) => transaction.snapshotCell.createMany({ data }));
+
+  const relationRows: Prisma.SnapshotRelationCreateManyInput[] = [];
+  const relationLinkRows: Prisma.SnapshotRelationLinkCreateManyInput[] = [];
   for (const [displayOrder, relation] of records(document.sheetRelations).entries()) {
     const links = records(relation.links);
-    await transaction.snapshotRelation.create({ data: {
-      id: crypto.randomUUID(), snapshotId, originalRelationId: text(relation.id, crypto.randomUUID()),
+    const relationId = crypto.randomUUID();
+    relationRows.push({
+      id: relationId, snapshotId, originalRelationId: text(relation.id, crypto.randomUUID()),
       sourceSheetOriginalId: text(relation.sourceSheetId), sourceColumn: text(relation.sourceColumn),
       targetSheetOriginalId: text(relation.targetSheetId), targetColumn: text(relation.targetColumn),
       relationType: text(relation.relationType), relationOrigin: text(relation.relationOrigin, "manual"),
-      updateOption: text(relation.updateOption) || null,
-      displayOrder,
-      links: { create: links.map((link, linkOrder) => ({
-        id: crypto.randomUUID(), sourceRowId: text(link.sourceRowId), targetRowId: text(link.targetRowId), linkOrder,
-      })) },
-    } });
+      updateOption: text(relation.updateOption) || null, displayOrder,
+    });
+    links.forEach((link, linkOrder) => relationLinkRows.push({
+      id: crypto.randomUUID(), relationId, sourceRowId: text(link.sourceRowId),
+      targetRowId: text(link.targetRowId), linkOrder,
+    }));
   }
+
+  await createInChunks(relationRows, (data) => transaction.snapshotRelation.createMany({ data }));
+  await createInChunks(relationLinkRows, (data) => transaction.snapshotRelationLink.createMany({ data }));
+
+  const fieldRows: Prisma.SnapshotCalculatedFieldCreateManyInput[] = [];
+  const ruleRows: Prisma.SnapshotCalculationRuleCreateManyInput[] = [];
+  const conditionRows: Prisma.SnapshotCalculationConditionCreateManyInput[] = [];
   for (const [displayOrder, field] of records(document.calculatedFields).entries()) {
     const parts = calculationParts(field);
-    await transaction.snapshotCalculatedField.create({ data: {
-      id: crypto.randomUUID(), snapshotId, originalFieldId: text(field.id, crypto.randomUUID()),
+    const calculatedFieldId = crypto.randomUUID();
+    fieldRows.push({
+      id: calculatedFieldId, snapshotId, originalFieldId: text(field.id, crypto.randomUUID()),
       resultSheetOriginalId: text(field.resultSheetId), name: text(field.name),
       fieldType: text(field.kind, "arithmetic"), color: text(field.color) || null, displayOrder,
-      rules: { create: parts.rules }, conditions: { create: parts.conditions },
-    } });
+    });
+    parts.rules.forEach((rule) => ruleRows.push({
+      ...rule, snapshotCalculatedFieldId: calculatedFieldId,
+    }));
+    parts.conditions.forEach((condition) => conditionRows.push({
+      ...condition, snapshotCalculatedFieldId: calculatedFieldId,
+    }));
   }
+
+  await createInChunks(fieldRows, (data) => transaction.snapshotCalculatedField.createMany({ data }));
+  await createInChunks(ruleRows, (data) => transaction.snapshotCalculationRule.createMany({ data }));
+  await createInChunks(conditionRows, (data) => transaction.snapshotCalculationCondition.createMany({ data }));
   return withoutNormalizedDefinitions(document);
 }
 

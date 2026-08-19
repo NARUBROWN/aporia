@@ -10,6 +10,8 @@ import { snapshotNormalizedProject } from "@/lib/normalized-snapshots";
 
 type DocumentRecord = Record<string, unknown>;
 
+class ProjectVersionConflictError extends Error {}
+
 function snapshotResponse(snapshot: {
   id: string;
   projectVersion: bigint;
@@ -86,14 +88,30 @@ export async function POST(
 
   const sourceDocument = body.document as DocumentRecord;
   const document = withoutNormalizedDefinitions(sourceDocument);
+  const baseVersion =
+    "baseVersion" in body && typeof body.baseVersion === "number"
+      ? body.baseVersion
+      : undefined;
+  if (
+    "baseVersion" in body &&
+    (!Number.isSafeInteger(baseVersion) || (baseVersion ?? 0) < 1)
+  )
+    return Response.json({ error: "INVALID_BASE_VERSION" }, { status: 400 });
   let result;
   try {
     result = await prisma.$transaction(async (transaction) => {
+      const updated = await transaction.project.updateMany({
+        where: {
+          id,
+          ...(baseVersion === undefined ? {} : { version: BigInt(baseVersion) }),
+        },
+        data: { document, version: { increment: 1 } },
+      });
+      if (updated.count !== 1) throw new ProjectVersionConflictError();
       await syncDocumentSheets(transaction, id, sourceDocument);
       await syncNormalizedDefinitions(transaction, id, sourceDocument);
-      const project = await transaction.project.update({
+      const project = await transaction.project.findUniqueOrThrow({
         where: { id },
-        data: { document, version: { increment: 1 } },
         select: { id: true, version: true, updatedAt: true },
       });
       const snapshot = await transaction.projectSnapshot.create({
@@ -115,6 +133,8 @@ export async function POST(
       return { project, snapshot };
     });
   } catch (error) {
+    if (error instanceof ProjectVersionConflictError)
+      return Response.json({ error: "PROJECT_VERSION_CONFLICT" }, { status: 409 });
     if (error instanceof NormalizedDefinitionError)
       return Response.json({ error: error.code, message: error.message }, { status: 422 });
     throw error;
