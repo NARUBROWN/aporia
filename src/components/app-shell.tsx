@@ -21,11 +21,11 @@ export async function AppShell({ children, active, compact = false }: { children
           <nav className="side-nav" aria-label="주요 메뉴">
             {nav.map((item) => {
               const NavIcon = item.icon;
-              return <Link key={item.href} href={item.href} className={activePath === item.href ? "active" : ""}><NavIcon /><span>{item.label}</span></Link>;
+              return <Link key={item.href} href={item.href} className={activePath === item.href ? "active" : ""} aria-label={item.label} title={item.label}><NavIcon /><span>{item.label}</span></Link>;
             })}
           </nav>
           <div className="sidebar-bottom">
-            <Link href="/settings" className={active === "settings" ? "active" : ""}><Icons.settings /><span>설정</span></Link>
+            <Link href="/settings" className={active === "settings" ? "active" : ""} aria-label="설정" title="설정"><Icons.settings /><span>설정</span></Link>
             {user ? <Link href="/settings" className="profile-row" aria-label={`${user.name} 프로필`} title={`${user.name} 프로필`}><span className="avatar">{user.name.slice(0, 1)}</span><span><strong>{user.name}</strong><small>@{user.username}</small></span><Icons.more /></Link> : <div className="sidebar-auth-links"><Link href="/login" aria-label="로그인" title="로그인"><Icons.logIn /><span>로그인</span></Link><Link href="/signup" aria-label="회원가입" title="회원가입"><Icons.userPlus /><span>회원가입</span></Link></div>}
           </div>
         </aside>
