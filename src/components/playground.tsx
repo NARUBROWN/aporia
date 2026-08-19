@@ -4988,7 +4988,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       style={{
         gridTemplateRows:
           sheetDockMode === "minimized"
-            ? "62px minmax(0, 1fr) 38px"
+            ? "62px minmax(0, 1fr) 48px"
             : sheetDockMode === "maximized"
               ? "62px 0 minmax(0, 1fr)"
               : `62px minmax(180px, 1fr) ${sheetDockHeight}px`,
