@@ -4126,18 +4126,15 @@ svg {
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-inline: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--muted) transparent;
+  scrollbar-width: none;
   border-bottom: 1px solid var(--line);
   background: var(--soft);
   padding-left: 10px;
 }
 .sheet-tabs::-webkit-scrollbar {
-  height: 5px;
-}
-.sheet-tabs::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--muted);
+  display: none;
+  width: 0;
+  height: 0;
 }
 .sheet-tabs > * {
   flex-shrink: 0;
@@ -6263,18 +6260,18 @@ svg {
 .sheet-tab-relation:not(.has-relations) {
   align-self: stretch;
   height: auto;
-  margin: -3px 0 0;
-  padding: 3px 0 0;
-  box-sizing: content-box;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 .sheet-tab-close {
   align-self: stretch;
   height: auto;
-  margin: -3px 0 0;
-  padding: 3px 0 0;
+  margin: 0;
+  padding: 0;
   display: grid;
   place-items: center;
-  box-sizing: content-box;
+  box-sizing: border-box;
   color: var(--muted);
   font-size: 12px;
 }
@@ -6563,6 +6560,9 @@ svg {
 .compact-shell .sheet-tabs {
   padding-left: 13px;
 }
+.compact-shell .sheet-tab {
+  height: 48px;
+}
 .compact-shell .sheet-title {
   gap: 7px;
   padding-inline: 5px 16px;
@@ -6777,6 +6777,9 @@ svg {
   place-items: center;
   z-index: 100;
   backdrop-filter: blur(2px);
+}
+.compact-shell .relation-modal-backdrop {
+  inset: 0 0 44px;
 }
 .relation-modal {
   width: min(520px, calc(100vw - 32px));
