@@ -2547,13 +2547,13 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
   const undoProjectRef = useRef<() => void>(() => undefined);
   const redoProjectRef = useRef<() => void>(() => undefined);
   const manualSaveProjectRef = useRef<() => Promise<void>>(async () => undefined);
-  const [sheetDockHeight, setSheetDockHeight] = useState(235);
+  const [sheetDockHeight, setSheetDockHeight] = useState(190);
   const [sheetDockMode, setSheetDockMode] =
     useState<SheetDockMode>("normal");
   const [sheetViewMode, setSheetViewMode] = useState<SheetViewMode>("grid");
   const [sheetSearchOpen, setSheetSearchOpen] = useState(false);
   const [sheetSearchQuery, setSheetSearchQuery] = useState("");
-  const normalSheetDockHeightRef = useRef(235);
+  const normalSheetDockHeightRef = useRef(190);
   const panRef = useRef<{
     startX: number;
     startY: number;
@@ -4960,7 +4960,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             ? "62px minmax(0, 1fr) 38px"
             : sheetDockMode === "maximized"
               ? "62px 0 minmax(0, 1fr)"
-              : `62px minmax(180px, 1fr) ${sheets.length === 0 ? 150 : sheetDockHeight}px`,
+              : `62px minmax(180px, 1fr) ${sheetDockHeight}px`,
       }}
     >
       <header className="studio-topbar">

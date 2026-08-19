@@ -63,7 +63,7 @@ export async function currentUser() {
     include: { user: true },
   });
   if (!session || session.expiresAt <= new Date() || session.user.deletedAt) return null;
-  return { id: session.user.id, username: session.user.username, name: session.user.name };
+  return { id: session.user.id, username: session.user.username, name: session.user.name, theme: session.user.theme };
 }
 
 export async function sessionFromRequest(request: Request) {

@@ -13,7 +13,7 @@ export async function AppShell({ children, active, compact = false }: { children
   const activePath = active === "home" ? "/" : `/${active}`;
   const user = await currentUser();
   return (
-    <div className={`app-frame ${compact ? "compact-shell" : ""}`}>
+    <div className={`app-frame ${compact ? "compact-shell" : ""}`} data-theme={user?.theme ?? "indigo-lavender"}>
       <aside className="sidebar">
         <div className="sidebar-top"><Logo /></div>
         <nav className="side-nav" aria-label="주요 메뉴">
@@ -24,7 +24,7 @@ export async function AppShell({ children, active, compact = false }: { children
         </nav>
         <div className="sidebar-bottom">
           <Link href="/settings" className={active === "settings" ? "active" : ""}><Icons.settings /><span>설정</span></Link>
-          {user ? <Link href="/settings" className="profile-row"><span className="avatar">{user.name.slice(0, 1)}</span><span><strong>{user.name}</strong><small>@{user.username}</small></span><Icons.more /></Link> : <div className="sidebar-auth-links"><Link href="/login" aria-label="로그인" title="로그인"><Icons.logIn /><span>로그인</span></Link><Link href="/signup" aria-label="회원가입" title="회원가입"><Icons.userPlus /><span>회원가입</span></Link></div>}
+          {user ? <Link href="/settings" className="profile-row" aria-label={`${user.name} 프로필`} title={`${user.name} 프로필`}><span className="avatar">{user.name.slice(0, 1)}</span><span><strong>{user.name}</strong><small>@{user.username}</small></span><Icons.more /></Link> : <div className="sidebar-auth-links"><Link href="/login" aria-label="로그인" title="로그인"><Icons.logIn /><span>로그인</span></Link><Link href="/signup" aria-label="회원가입" title="회원가입"><Icons.userPlus /><span>회원가입</span></Link></div>}
         </div>
       </aside>
       <div className="app-main">{children}</div>

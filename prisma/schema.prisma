@@ -39,6 +39,7 @@ model User {
   privacyAgreedAt DateTime   @map("privacy_agreed_at") @db.Timestamptz(6)
   termsVersion    String     @map("terms_version") @db.Text
   privacyVersion  String     @map("privacy_version") @db.Text
+  theme            String     @default("indigo-lavender") @db.Text
   sessions     AuthSession[]
   projects     Project[]
 
