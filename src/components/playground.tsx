@@ -4960,7 +4960,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
             ? "62px minmax(0, 1fr) 38px"
             : sheetDockMode === "maximized"
               ? "62px 0 minmax(0, 1fr)"
-              : `62px minmax(180px, 1fr) ${sheetDockHeight}px`,
+              : `62px minmax(180px, 1fr) ${sheets.length === 0 ? 150 : sheetDockHeight}px`,
       }}
     >
       <header className="studio-topbar">
@@ -5626,7 +5626,7 @@ export function Playground({ projectId, projectName, hasPassword }: { projectId:
         )}
       </div>
       <section
-        className={`sheet-dock ${sheetDockMode}${!hydrated ? " loading" : ""}`}
+        className={`sheet-dock ${sheetDockMode}${sheets.length === 0 ? " empty" : ""}${!hydrated ? " loading" : ""}`}
         aria-label="데이터 시트"
         aria-busy={!hydrated}
       >

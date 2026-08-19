@@ -26,6 +26,8 @@ export const Icons = {
   list: (props: IconProps) => <Icon {...props}><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></Icon>,
   bolt: (props: IconProps) => <Icon {...props}><path d="m13 2-9 12h7l-1 8 9-12h-7z"/></Icon>,
   user: (props: IconProps) => <Icon {...props}><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></Icon>,
+  logIn: (props: IconProps) => <Icon {...props}><path d="M10 5H5v14h5"/><path d="m14 8 4 4-4 4M18 12H9"/></Icon>,
+  userPlus: (props: IconProps) => <Icon {...props}><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/></Icon>,
   check: (props: IconProps) => <Icon {...props}><path d="m5 12 4 4L19 6"/></Icon>,
   clock: (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></Icon>,
   save: (props: IconProps) => <Icon {...props}><path d="M5 3h12l2 2v16H5z"/><path d="M8 3v6h8V3M8 21v-7h8v7"/></Icon>,

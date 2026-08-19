@@ -19,7 +19,7 @@ export default async function Home() {
   const projects = user ? (await prisma.project.findMany({ where: { deletedAt: null, ownerId: user.id }, orderBy: { updatedAt: "desc" }, take: 3 })).map(toProjectListItem) : [];
   return (
     <AppShell active="home">
-      <Topbar title="홈" actions={<><button className="icon-button" aria-label="검색"><Icons.search /></button><Link className="button primary small" href="/projects/new"><Icons.plus />새 프로젝트</Link></>} />
+      <Topbar title="홈" />
       <main className="page-content dashboard">
         <section className="welcome-row">
           <div><span className="eyebrow">{today}</span><h2>안녕하세요</h2><p>아이디어를 눈에 보이는 시스템으로 만들어보세요.</p></div>

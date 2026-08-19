@@ -2,8 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Aporia",
+  title: "Aporia: 모두의 해결사",
   description: "도메인 시스템을 시각적으로 설계하고 실행하는 도구",
+  icons: { icon: "/icon.svg" },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
