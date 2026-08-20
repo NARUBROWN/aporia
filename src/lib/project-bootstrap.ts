@@ -48,7 +48,9 @@ export async function loadProjectSheetMetadata(projectId: string) {
         relationType: true,
         relationOrigin: true,
         sourceColumn: { select: { name: true } },
+        sourceCalculatedField: { select: { name: true } },
         targetColumn: { select: { name: true } },
+        targetCalculatedField: { select: { name: true } },
       },
     }),
     prisma.calculatedFieldRecord.findMany({
@@ -110,9 +112,11 @@ export async function loadProjectSheetMetadata(projectId: string) {
     relations: relations.map((relation) => ({
       id: relation.id,
       sourceSheetId: relation.sourceSheetId,
-      sourceColumn: relation.sourceColumn.name,
+      sourceColumn:
+        relation.sourceColumn?.name ?? relation.sourceCalculatedField?.name ?? "",
       targetSheetId: relation.targetSheetId,
-      targetColumn: relation.targetColumn.name,
+      targetColumn:
+        relation.targetColumn?.name ?? relation.targetCalculatedField?.name ?? "",
       relationType: relation.relationType,
       relationOrigin: relation.relationOrigin,
     })),

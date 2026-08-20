@@ -126,37 +126,46 @@ model SheetColumn {
 }
 
 model SheetRelation {
-  id             String       @id @db.Uuid
-  sourceSheetId  String       @map("source_sheet_id") @db.Uuid
-  sourceColumnId String       @map("source_column_id") @db.Uuid
-  targetSheetId  String       @map("target_sheet_id") @db.Uuid
-  targetColumnId String       @map("target_column_id") @db.Uuid
-  relationType   String       @map("relation_type") @db.Text
-  relationOrigin String       @default("manual") @map("relation_origin") @db.Text
-  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  sourceSheet    ProjectSheet @relation("RelationSourceSheet", fields: [sourceSheetId], references: [id], onDelete: Cascade)
-  targetSheet    ProjectSheet @relation("RelationTargetSheet", fields: [targetSheetId], references: [id], onDelete: Cascade)
-  sourceColumn   SheetColumn  @relation("RelationSourceColumn", fields: [sourceColumnId], references: [id], onDelete: Cascade)
-  targetColumn   SheetColumn  @relation("RelationTargetColumn", fields: [targetColumnId], references: [id], onDelete: Cascade)
+  id                      String                 @id @db.Uuid
+  sourceSheetId           String                 @map("source_sheet_id") @db.Uuid
+  sourceColumnId          String?                @map("source_column_id") @db.Uuid
+  sourceCalculatedFieldId String?                @map("source_calculated_field_id") @db.Uuid
+  targetSheetId           String                 @map("target_sheet_id") @db.Uuid
+  targetColumnId          String?                @map("target_column_id") @db.Uuid
+  targetCalculatedFieldId String?                @map("target_calculated_field_id") @db.Uuid
+  relationType            String                 @map("relation_type") @db.Text
+  relationOrigin          String                 @default("manual") @map("relation_origin") @db.Text
+  createdAt               DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  sourceSheet             ProjectSheet           @relation("RelationSourceSheet", fields: [sourceSheetId], references: [id], onDelete: Cascade)
+  targetSheet             ProjectSheet           @relation("RelationTargetSheet", fields: [targetSheetId], references: [id], onDelete: Cascade)
+  sourceColumn            SheetColumn?           @relation("RelationSourceColumn", fields: [sourceColumnId], references: [id], onDelete: Cascade)
+  targetColumn            SheetColumn?           @relation("RelationTargetColumn", fields: [targetColumnId], references: [id], onDelete: Cascade)
+  sourceCalculatedField   CalculatedFieldRecord? @relation("RelationSourceCalculatedField", fields: [sourceCalculatedFieldId], references: [id], onDelete: Cascade)
+  targetCalculatedField   CalculatedFieldRecord? @relation("RelationTargetCalculatedField", fields: [targetCalculatedFieldId], references: [id], onDelete: Cascade)
 
   @@unique([sourceColumnId, targetColumnId])
+  @@unique([sourceColumnId, targetCalculatedFieldId])
+  @@unique([sourceCalculatedFieldId, targetColumnId])
+  @@unique([sourceCalculatedFieldId, targetCalculatedFieldId])
   @@index([sourceSheetId, createdAt])
   @@index([targetSheetId])
   @@map("sheet_relations")
 }
 
 model CalculatedFieldRecord {
-  id           String                 @id @db.Uuid
-  sheetId      String                 @map("sheet_id") @db.Uuid
-  name         String                 @db.Text
-  fieldType    String                 @map("field_type") @db.Text
-  color        String?                @db.Text
-  displayOrder Int                    @default(0) @map("display_order")
-  createdAt    DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
-  sheet        ProjectSheet           @relation(fields: [sheetId], references: [id], onDelete: Cascade)
-  rules        CalculationRule[]
-  conditions   CalculationCondition[]
+  id              String                 @id @db.Uuid
+  sheetId         String                 @map("sheet_id") @db.Uuid
+  name            String                 @db.Text
+  fieldType       String                 @map("field_type") @db.Text
+  color           String?                @db.Text
+  displayOrder    Int                    @default(0) @map("display_order")
+  createdAt       DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
+  sheet           ProjectSheet           @relation(fields: [sheetId], references: [id], onDelete: Cascade)
+  rules           CalculationRule[]
+  conditions      CalculationCondition[]
+  sourceRelations SheetRelation[]        @relation("RelationSourceCalculatedField")
+  targetRelations SheetRelation[]        @relation("RelationTargetCalculatedField")
 
   @@unique([sheetId, name])
   @@index([sheetId, displayOrder])

@@ -169,3 +169,81 @@ test("조건부합산은 다른 계산 필드가 참조한 정제 값까지 계�
     "600",
   );
 });
+
+test("조건부합산은 정제 필드를 관계 키로 사용한다", () => {
+  const cotSheet: Sheet = {
+    id: "cot-sheet",
+    name: "COT유틸Total",
+    columns: ["코스트센터"],
+    columnTypes: ["text"],
+    rowIds: ["cot-1"],
+    rows: [["121401"]],
+  };
+  const utilitySheet: Sheet = {
+    id: "utility-sheet",
+    name: "STG_SAP_ZCOT0110",
+    columns: ["OBJNR", "금액"],
+    columnTypes: ["text", "number"],
+    rowIds: ["utility-1", "utility-2"],
+    rows: [
+      ["KS10000000121401", "100"],
+      ["KS10000000121402", "900"],
+    ],
+  };
+  const extractedCostCenter: CalculatedField = {
+    id: "extracted-cost-center",
+    kind: "transform",
+    name: "COT NO 추출",
+    resultSheetId: utilitySheet.id,
+    sourceColumn: "OBJNR",
+    condition: {
+      enabled: false,
+      column: "OBJNR",
+      operator: "contains",
+      value: "",
+    },
+    steps: [{ id: "take-right", type: "takeRight", length: 6 }],
+    fallback: "empty",
+    outputType: "text",
+  };
+  const derivedRelation: SheetRelation = {
+    id: "derived-key-relation",
+    sourceSheetId: cotSheet.id,
+    sourceColumn: "코스트센터",
+    targetSheetId: utilitySheet.id,
+    targetColumn: extractedCostCenter.name,
+    relationType: "1:N",
+    updateOption: "none",
+    links: [],
+  };
+  const conditionalSum: CalculatedField = {
+    id: "derived-relation-sum",
+    kind: "conditionalSum",
+    name: "유틸 합계",
+    resultSheetId: cotSheet.id,
+    sourceSheetId: utilitySheet.id,
+    relationPath: [derivedRelation.id],
+    valueColumn: "금액",
+    conditions: [
+      {
+        id: "all-nonblank",
+        sheetId: utilitySheet.id,
+        relationPath: [derivedRelation.id],
+        column: extractedCostCenter.name,
+        operator: "isNotBlank",
+        operand: { kind: "literal", value: "" },
+      },
+    ],
+  };
+
+  assert.equal(
+    calculateFieldValue(
+      conditionalSum,
+      [derivedRelation],
+      [cotSheet, utilitySheet],
+      cotSheet.rowIds[0],
+      [extractedCostCenter, conditionalSum],
+    ),
+    "100",
+  );
+});

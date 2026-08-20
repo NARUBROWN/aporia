@@ -832,9 +832,19 @@ function relationHasAtMostOneLinkFrom(
   relation: SheetRelation,
   fromSheetId: string,
   sheets: Sheet[],
+  calculatedFields: CalculatedField[],
+  selectionValues: FilterSelections,
+  relations: SheetRelation[],
 ) {
   const counts = new Map<string, number>();
-  buildRelationLinks(relation, sheets).forEach((link) => {
+  buildRelationLinks(
+    relation,
+    sheets,
+    calculatedFields,
+    selectionValues,
+    new Set(),
+    relations,
+  ).forEach((link) => {
     const rowId =
       relation.sourceSheetId === fromSheetId
         ? link.sourceRowId
@@ -848,6 +858,8 @@ function reachableSheetsFrom(
   startSheet: Sheet,
   relations: SheetRelation[],
   sheets: Sheet[],
+  calculatedFields: CalculatedField[],
+  selectionValues: FilterSelections,
 ) {
   const result: ReachableSheet[] = [{ sheet: startSheet, relationPath: [] }];
   const visited = new Set([startSheet.id]);
@@ -856,7 +868,14 @@ function reachableSheetsFrom(
     relations.forEach((relation) => {
       if (
         !relationAllowsSingleRowFrom(relation, current.sheet.id) ||
-        !relationHasAtMostOneLinkFrom(relation, current.sheet.id, sheets)
+        !relationHasAtMostOneLinkFrom(
+          relation,
+          current.sheet.id,
+          sheets,
+          calculatedFields,
+          selectionValues,
+          relations,
+        )
       )
         return;
       const nextSheetId =
@@ -914,6 +933,9 @@ function traverseRelatedRows(
   relationPath: string[],
   relations: SheetRelation[],
   sheets: Sheet[],
+  calculatedFields: CalculatedField[] = [],
+  selectionValues: FilterSelections = {},
+  resolvingFieldIds: Set<string> = new Set(),
 ) {
   let currentSheetId = startSheetId;
   let currentRowIds = [startRowId];
@@ -927,7 +949,14 @@ function traverseRelatedRows(
       return { sheetId: currentSheetId, rowIds: [] };
     const fromSource = relation.sourceSheetId === currentSheetId;
     const rowIds = new Set(currentRowIds);
-    const currentLinks = buildRelationLinks(relation, sheets);
+    const currentLinks = buildRelationLinks(
+      relation,
+      sheets,
+      calculatedFields,
+      selectionValues,
+      resolvingFieldIds,
+      relations,
+    );
     currentRowIds = [
       ...new Set(
         currentLinks.flatMap((link) => {
@@ -979,6 +1008,9 @@ function conditionRowsForAggregateRow(
   resultRowId: string,
   relations: SheetRelation[],
   sheets: Sheet[],
+  calculatedFields: CalculatedField[],
+  selectionValues: FilterSelections,
+  resolvingFieldIds: Set<string>,
 ) {
   const conditionPath = condition.relationPath ?? field.relationPath;
   if (relationPathStartsWith(conditionPath, field.relationPath))
@@ -988,6 +1020,9 @@ function conditionRowsForAggregateRow(
       conditionPath.slice(field.relationPath.length),
       relations,
       sheets,
+      calculatedFields,
+      selectionValues,
+      resolvingFieldIds,
     );
   return traverseRelatedRows(
     field.resultSheetId,
@@ -995,6 +1030,9 @@ function conditionRowsForAggregateRow(
     conditionPath,
     relations,
     sheets,
+    calculatedFields,
+    selectionValues,
+    resolvingFieldIds,
   );
 }
 
@@ -1044,6 +1082,9 @@ function calculateConditionalSum(
     field.relationPath,
     relations,
     sheets,
+    calculatedFields,
+    selectionValues,
+    resolvingFieldIds,
   );
   if (traversed.sheetId !== field.sourceSheetId) return "연결 없음";
   let total = 0;
@@ -1065,6 +1106,9 @@ function calculateConditionalSum(
         resultRowId,
         relations,
         sheets,
+        calculatedFields,
+        selectionValues,
+        resolvingFieldIds,
       );
       if (conditionRows.sheetId !== conditionSheetId) return false;
       const right =
@@ -2700,6 +2744,8 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     activeSheet,
     sheetRelations,
     sheets,
+    calculatedFields,
+    filterSelections,
   );
   const calculableSheetPaths = reachableSheetPaths.filter(
     ({ sheet }) => numericFieldNames(sheet).length > 0,
@@ -4906,6 +4952,19 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   }
 
   function deleteCalculatedField(field: CalculatedField) {
+    const relationDependents = sheetRelations.filter(
+      (relation) =>
+        (relation.sourceSheetId === field.resultSheetId &&
+          relation.sourceColumn === field.name) ||
+        (relation.targetSheetId === field.resultSheetId &&
+          relation.targetColumn === field.name),
+    );
+    if (relationDependents.length > 0) {
+      window.alert(
+        `'${field.name}'을(를) 사용하는 시트 관계를 먼저 삭제해주세요.`,
+      );
+      return;
+    }
     const dependents = calculatedFields.filter(
       (candidate) => {
         if (isConditionalSumField(candidate))

@@ -258,39 +258,6 @@ export async function syncNormalizedDefinitions(
   const findColumn = (sheetId: string, name: string) =>
     sheetMap.get(sheetId)?.columns.find((item) => item.name === name);
 
-  const relationRows = requestedRelations.map((relation) => {
-    const id = text(relation.id);
-    const sourceSheetId = text(relation.sourceSheetId);
-    const targetSheetId = text(relation.targetSheetId);
-    const sourceColumnName = text(relation.sourceColumn);
-    const targetColumnName = text(relation.targetColumn);
-    const relationType = text(relation.relationType);
-    if (!id || !sourceSheetId || !targetSheetId || !sourceColumnName || !targetColumnName || !relationType)
-      throw new NormalizedDefinitionError("INVALID_RELATION", "관계 정의에 필수 값이 없습니다.");
-    const sourceColumn = findColumn(sourceSheetId, sourceColumnName);
-    const targetColumn = findColumn(targetSheetId, targetColumnName);
-    if (!sourceColumn || !targetColumn)
-      throw new NormalizedDefinitionError("ORPHAN_RELATION", "관계가 현재 프로젝트에 없는 시트 또는 컬럼을 참조합니다.");
-    if (sourceColumn.id === targetColumn.id)
-      throw new NormalizedDefinitionError("SELF_RELATION", "같은 컬럼을 자기 자신에게 연결할 수 없습니다.");
-    return {
-      id,
-      sourceSheetId,
-      sourceColumnId: sourceColumn.id,
-      targetSheetId,
-      targetColumnId: targetColumn.id,
-      relationType,
-      relationOrigin: text(relation.relationOrigin) ?? "manual",
-    };
-  });
-  const endpointKeys = new Set<string>();
-  for (const relation of relationRows) {
-    const key = `${relation.sourceColumnId}:${relation.targetColumnId}`;
-    if (endpointKeys.has(key))
-      throw new NormalizedDefinitionError("DUPLICATE_RELATION", "같은 컬럼 관계가 중복되어 있습니다.");
-    endpointKeys.add(key);
-  }
-
   const fieldRows = requestedFields.map((field, displayOrder) => {
     const id = text(field.id);
     const name = text(field.name);
@@ -306,16 +273,60 @@ export async function syncNormalizedDefinitions(
       definition: field,
     };
   });
-  const hasCalculatedField = (sheetId: string, name: string) =>
-    fieldRows.some(
+  const findCalculatedField = (sheetId: string, name: string) =>
+    fieldRows.find(
       (field) => field.resultSheetId === sheetId && field.name === name,
     );
+  const hasCalculatedField = (sheetId: string, name: string) =>
+    Boolean(findCalculatedField(sheetId, name));
+
+  const relationRows = requestedRelations.map((relation) => {
+    const id = text(relation.id);
+    const sourceSheetId = text(relation.sourceSheetId);
+    const targetSheetId = text(relation.targetSheetId);
+    const sourceColumnName = text(relation.sourceColumn);
+    const targetColumnName = text(relation.targetColumn);
+    const relationType = text(relation.relationType);
+    if (!id || !sourceSheetId || !targetSheetId || !sourceColumnName || !targetColumnName || !relationType)
+      throw new NormalizedDefinitionError("INVALID_RELATION", "관계 정의에 필수 값이 없습니다.");
+    const sourceColumn = findColumn(sourceSheetId, sourceColumnName);
+    const targetColumn = findColumn(targetSheetId, targetColumnName);
+    const sourceCalculatedField = sourceColumn
+      ? undefined
+      : findCalculatedField(sourceSheetId, sourceColumnName);
+    const targetCalculatedField = targetColumn
+      ? undefined
+      : findCalculatedField(targetSheetId, targetColumnName);
+    const sourceEndpoint = sourceColumn ?? sourceCalculatedField;
+    const targetEndpoint = targetColumn ?? targetCalculatedField;
+    if (!sourceEndpoint || !targetEndpoint)
+      throw new NormalizedDefinitionError("ORPHAN_RELATION", "관계가 현재 프로젝트에 없는 시트, 컬럼 또는 계산 필드를 참조합니다.");
+    if (sourceEndpoint.id === targetEndpoint.id)
+      throw new NormalizedDefinitionError("SELF_RELATION", "같은 필드를 자기 자신에게 연결할 수 없습니다.");
+    return {
+      id,
+      sourceSheetId,
+      sourceColumnId: sourceColumn?.id ?? null,
+      sourceCalculatedFieldId: sourceCalculatedField?.id ?? null,
+      targetSheetId,
+      targetColumnId: targetColumn?.id ?? null,
+      targetCalculatedFieldId: targetCalculatedField?.id ?? null,
+      relationType,
+      relationOrigin: text(relation.relationOrigin) ?? "manual",
+    };
+  });
+  const endpointKeys = new Set<string>();
+  for (const relation of relationRows) {
+    const key = `${relation.sourceSheetId}:${relation.sourceColumnId ?? relation.sourceCalculatedFieldId}:${relation.targetSheetId}:${relation.targetColumnId ?? relation.targetCalculatedFieldId}`;
+    if (endpointKeys.has(key))
+      throw new NormalizedDefinitionError("DUPLICATE_RELATION", "같은 컬럼 관계가 중복되어 있습니다.");
+    endpointKeys.add(key);
+  }
 
   await transaction.calculationCondition.deleteMany({ where: { calculatedField: { sheet: { projectId } } } });
   await transaction.calculationRule.deleteMany({ where: { calculatedField: { sheet: { projectId } } } });
-  await transaction.calculatedFieldRecord.deleteMany({ where: { sheet: { projectId } } });
   await transaction.sheetRelation.deleteMany({ where: { sourceSheet: { projectId } } });
-  if (relationRows.length) await transaction.sheetRelation.createMany({ data: relationRows });
+  await transaction.calculatedFieldRecord.deleteMany({ where: { sheet: { projectId } } });
   for (const field of fieldRows) {
     const definition = field.definition;
     const rules: Array<{ id: string; stepOrder: number; operation: string; arguments: Prisma.InputJsonValue }> = [];
@@ -418,6 +429,8 @@ export async function syncNormalizedDefinitions(
       },
     });
   }
+  if (relationRows.length)
+    await transaction.sheetRelation.createMany({ data: relationRows });
 }
 
 export function withoutNormalizedDefinitions(document: JsonRecord): Prisma.InputJsonValue {

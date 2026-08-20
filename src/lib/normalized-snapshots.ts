@@ -260,7 +260,12 @@ export async function snapshotNormalizedProject(
     transaction.sheetRelation.findMany({
       where: { sourceSheet: { projectId } },
       orderBy: { createdAt: "asc" },
-      include: { sourceColumn: true, targetColumn: true },
+      include: {
+        sourceColumn: true,
+        sourceCalculatedField: true,
+        targetColumn: true,
+        targetCalculatedField: true,
+      },
     }),
     transaction.calculatedFieldRecord.findMany({
       where: { sheet: { projectId } },
@@ -302,9 +307,11 @@ export async function snapshotNormalizedProject(
     sheetRelations: relations.map((relation) => ({
       id: relation.id,
       sourceSheetId: relation.sourceSheetId,
-      sourceColumn: relation.sourceColumn.name,
+      sourceColumn:
+        relation.sourceColumn?.name ?? relation.sourceCalculatedField?.name ?? "",
       targetSheetId: relation.targetSheetId,
-      targetColumn: relation.targetColumn.name,
+      targetColumn:
+        relation.targetColumn?.name ?? relation.targetCalculatedField?.name ?? "",
       relationType: relation.relationType,
       relationOrigin: relation.relationOrigin,
     })),
