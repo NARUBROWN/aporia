@@ -48,7 +48,7 @@ type CanvasItem = {
   y?: number;
 };
 type ColumnType = "text" | "number" | "date" | "boolean";
-type Sheet = {
+export type Sheet = {
   id: string;
   name: string;
   color?: string;
@@ -142,7 +142,7 @@ type FilterBinding = {
   includeAllOption: boolean;
 };
 type FilterBindings = Record<string, FilterBinding>;
-type FilterSelections = Record<string, string>;
+export type FilterSelections = Record<string, string>;
 type PendingNormalizedCellChange = {
   sheetId: string;
   rowId: string;
@@ -221,7 +221,7 @@ type DataBindingConfig = {
   selectedCandidateId: string;
   relationType: RelationType;
 };
-type SheetRelation = {
+export type SheetRelation = {
   id: string;
   sourceSheetId: string;
   sourceColumn: string;
@@ -313,7 +313,7 @@ type TransformCalculatedField = {
   fallback: "empty" | "original";
   outputType?: ColumnType;
 };
-type CalculatedField =
+export type CalculatedField =
   | ArithmeticCalculatedField
   | ConditionalSumField
   | TransformCalculatedField;
@@ -731,6 +731,10 @@ function isArithmeticField(
   return !isConditionalSumField(field) && !isTransformField(field);
 }
 
+export function isNumericCalculatedField(field: CalculatedField) {
+  return !isTransformField(field) || transformOutputType(field) === "number";
+}
+
 function conditionalOperatorLabel(operator: ConditionalOperator) {
   return {
     eq: "같음",
@@ -994,11 +998,42 @@ function conditionRowsForAggregateRow(
   );
 }
 
+function sheetFieldValue(
+  sheet: Sheet,
+  rowId: string,
+  fieldName: string,
+  relations: SheetRelation[],
+  sheets: Sheet[],
+  calculatedFields: CalculatedField[],
+  selectionValues: FilterSelections,
+  resolvingFieldIds: Set<string>,
+) {
+  const calculatedField = calculatedFields.find(
+    (field) =>
+      field.resultSheetId === sheet.id && field.name === fieldName,
+  );
+  if (calculatedField)
+    return calculateFieldValue(
+      calculatedField,
+      relations,
+      sheets,
+      rowId,
+      calculatedFields,
+      selectionValues,
+      resolvingFieldIds,
+    );
+  const rowIndex = sheet.rowIds.indexOf(rowId);
+  return sheet.rows[rowIndex]?.[sheet.columns.indexOf(fieldName)] ?? "";
+}
+
 function calculateConditionalSum(
   field: ConditionalSumField,
   relations: SheetRelation[],
   sheets: Sheet[],
   resultRowId: string,
+  calculatedFields: CalculatedField[],
+  selectionValues: FilterSelections,
+  resolvingFieldIds: Set<string>,
 ) {
   const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
   const sourceSheet = sheets.find((sheet) => sheet.id === field.sourceSheetId);
@@ -1011,8 +1046,8 @@ function calculateConditionalSum(
     sheets,
   );
   if (traversed.sheetId !== field.sourceSheetId) return "연결 없음";
-  const resultRowIndex = resultSheet.rowIds.indexOf(resultRowId);
   let total = 0;
+  let evaluationError = "";
   for (const rowId of traversed.rowIds) {
     const rowIndex = sourceSheet.rowIds.indexOf(rowId);
     const row = sourceSheet.rows[rowIndex];
@@ -1035,22 +1070,52 @@ function calculateConditionalSum(
       const right =
         condition.operand.kind === "literal"
           ? condition.operand.value
-          : (resultSheet.rows[resultRowIndex]?.[
-              resultSheet.columns.indexOf(condition.operand.column)
-            ] ?? "");
+          : sheetFieldValue(
+              resultSheet,
+              resultRowId,
+              condition.operand.column,
+              relations,
+              sheets,
+              calculatedFields,
+              selectionValues,
+              resolvingFieldIds,
+            );
+      if (right === "순환 참조") {
+        evaluationError = right;
+        return false;
+      }
       return conditionRows.rowIds.some((conditionRowId) => {
-        const conditionRowIndex = conditionSheet.rowIds.indexOf(conditionRowId);
-        const left =
-          conditionSheet.rows[conditionRowIndex]?.[
-            conditionSheet.columns.indexOf(condition.column)
-          ] ?? "";
+        const left = sheetFieldValue(
+          conditionSheet,
+          conditionRowId,
+          condition.column,
+          relations,
+          sheets,
+          calculatedFields,
+          selectionValues,
+          resolvingFieldIds,
+        );
+        if (left === "순환 참조") {
+          evaluationError = left;
+          return false;
+        }
         return compareConditionalValues(left, condition.operator, right);
       });
     });
+    if (evaluationError) return evaluationError;
     if (!matches) continue;
-    const value = parseNumericValue(
-      row[sourceSheet.columns.indexOf(field.valueColumn)] ?? "",
+    const rawValue = sheetFieldValue(
+      sourceSheet,
+      rowId,
+      field.valueColumn,
+      relations,
+      sheets,
+      calculatedFields,
+      selectionValues,
+      resolvingFieldIds,
     );
+    if (rawValue === "순환 참조") return rawValue;
+    const value = parseNumericValue(rawValue);
     if (value === null) return "숫자 필요";
     total += value;
   }
@@ -1080,7 +1145,7 @@ function relationPathLabel(
   return names.join(" → ");
 }
 
-function calculateFieldValue(
+export function calculateFieldValue(
   field: CalculatedField,
   relations: SheetRelation[],
   sheets: Sheet[],
@@ -1092,7 +1157,15 @@ function calculateFieldValue(
   if (resolvingFieldIds.has(field.id)) return "순환 참조";
   const nextResolvingFieldIds = new Set(resolvingFieldIds).add(field.id);
   if (isConditionalSumField(field))
-    return calculateConditionalSum(field, relations, sheets, resultRowId);
+    return calculateConditionalSum(
+      field,
+      relations,
+      sheets,
+      resultRowId,
+      calculatedFields,
+      selectionValues,
+      nextResolvingFieldIds,
+    );
   if (isTransformField(field))
     return calculateTransformField(field, sheets, resultRowId);
   const resultSheet = sheets.find((sheet) => sheet.id === field.resultSheetId);
@@ -2474,6 +2547,10 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   const [loadingNormalizedSheetIds, setLoadingNormalizedSheetIds] = useState<
     string[]
   >([]);
+  const [addingNormalizedSheetId, setAddingNormalizedSheetId] = useState("");
+  const [deletingNormalizedRowKeys, setDeletingNormalizedRowKeys] = useState<
+    string[]
+  >([]);
   const [cellValidationErrors, setCellValidationErrors] = useState<
     Record<string, string>
   >({});
@@ -2602,7 +2679,10 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   const numericFieldNames = (sheet: Sheet) => [
     ...numericColumns(sheet),
     ...calculatedFields
-      .filter((field) => field.resultSheetId === sheet.id)
+      .filter(
+        (field) =>
+          field.resultSheetId === sheet.id && isNumericCalculatedField(field),
+      )
       .map((field) => field.name),
   ];
   const relationFieldNames = (sheet: Sheet) => [
@@ -2638,7 +2718,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   );
   const aggregateSheetPaths = conditionalSheetPaths.filter(
     ({ sheet, relationPath }) =>
-      relationPath.length > 0 && numericColumns(sheet).length > 0,
+      relationPath.length > 0 && numericFieldNames(sheet).length > 0,
   );
   const canCreateConditionalSum = aggregateSheetPaths.length > 0;
   const canvasContentHeight = items.reduce((bottom, item, index) => {
@@ -3943,7 +4023,52 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     });
   }
 
-  function addRow() {
+  async function addRow() {
+    if (activeSheet.normalized && projectId) {
+      const sheetId = activeSheet.id;
+      if (addingNormalizedSheetId === sheetId) return;
+      setAddingNormalizedSheetId(sheetId);
+      setSaveStatus("새 행 저장 중");
+      try {
+        const response = await fetch(
+          `/api/projects/${projectId}/sheets/${sheetId}/rows`,
+          { method: "POST" },
+        );
+        const payload = (await response.json().catch(() => ({}))) as {
+          row?: { id?: string; values?: string[] };
+          rowCount?: number;
+        };
+        if (
+          !response.ok ||
+          typeof payload.row?.id !== "string" ||
+          !Array.isArray(payload.row.values)
+        )
+          throw new Error("ROW_CREATE_FAILED");
+        setSheets((current) =>
+          current.map((sheet) =>
+            sheet.id !== sheetId || sheet.rowIds.includes(payload.row!.id!)
+              ? sheet
+              : {
+                  ...sheet,
+                  rowIds: [...sheet.rowIds, payload.row!.id!],
+                  rows: [...sheet.rows, payload.row!.values!],
+                  rowCount:
+                    typeof payload.rowCount === "number"
+                      ? payload.rowCount
+                      : (sheet.rowCount ?? sheet.rows.length) + 1,
+                },
+          ),
+        );
+        setSaveStatus("새 행 저장됨");
+      } catch {
+        setSaveStatus("새 행 저장 실패 · 다시 시도하세요");
+      } finally {
+        setAddingNormalizedSheetId((current) =>
+          current === sheetId ? "" : current,
+        );
+      }
+      return;
+    }
     setSheets((current) =>
       current.map((sheet) =>
         sheet.id !== activeSheet.id
@@ -3967,17 +4092,26 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     );
   }
 
-  function deleteRow(rowIndex: number) {
-    if (!window.confirm(`${rowIndex + 1}번째 행을 삭제할까요?`)) return;
-    const rowId = activeSheet.rowIds[rowIndex];
+  function removeRowFromClient(
+    sheetId: string,
+    rowId: string,
+    rowIndex: number,
+    rowCount?: number,
+  ) {
+    const remainingRowId =
+      activeSheet.rowIds.find((_, index) => index !== rowIndex) ?? "";
     setSheets((current) =>
       current.map((sheet) =>
-        sheet.id !== activeSheet.id
+        sheet.id !== sheetId
           ? sheet
           : {
               ...sheet,
-              rowIds: sheet.rowIds.filter((_, index) => index !== rowIndex),
-              rows: sheet.rows.filter((_, index) => index !== rowIndex),
+              rowIds: sheet.rowIds.filter((id) => id !== rowId),
+              rows: sheet.rows.filter(
+                (_, index) => sheet.rowIds[index] !== rowId,
+              ),
+              rowCount:
+                typeof rowCount === "number" ? rowCount : sheet.rowCount,
             },
       ),
     );
@@ -3985,13 +4119,8 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       Object.fromEntries(
         Object.entries(current).map(([itemId, binding]) => [
           itemId,
-          binding.sheetId === activeSheet.id && binding.rowId === rowId
-            ? {
-                ...binding,
-                rowId:
-                  activeSheet.rowIds.find((_, index) => index !== rowIndex) ??
-                  "",
-              }
+          binding.sheetId === sheetId && binding.rowId === rowId
+            ? { ...binding, rowId: remainingRowId }
             : binding,
         ]),
       ),
@@ -4000,10 +4129,62 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       current.map((relation) => ({
         ...relation,
         links: relation.links.filter(
-          (link) => link.sourceRowId !== rowId && link.targetRowId !== rowId,
+          (link) =>
+            (relation.sourceSheetId !== sheetId ||
+              link.sourceRowId !== rowId) &&
+            (relation.targetSheetId !== sheetId ||
+              link.targetRowId !== rowId),
         ),
       })),
     );
+    setCellValidationErrors((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([key]) => !key.startsWith(`${sheetId}:${rowId}:`),
+        ),
+      ),
+    );
+  }
+
+  async function deleteRow(rowIndex: number) {
+    if (!window.confirm(`${rowIndex + 1}번째 행을 삭제할까요?`)) return;
+    const sheetId = activeSheet.id;
+    const rowId = activeSheet.rowIds[rowIndex];
+    if (!rowId) return;
+    if (activeSheet.normalized && projectId) {
+      const rowKey = `${sheetId}:${rowId}`;
+      if (deletingNormalizedRowKeys.includes(rowKey)) return;
+      setDeletingNormalizedRowKeys((current) => [...current, rowKey]);
+      setSaveStatus("행 삭제 중");
+      try {
+        for (const key of pendingNormalizedCellChangesRef.current.keys())
+          if (key.startsWith(`${sheetId}:${rowId}:`))
+            pendingNormalizedCellChangesRef.current.delete(key);
+        await flushNormalizedCellChanges();
+        const response = await fetch(
+          `/api/projects/${projectId}/sheets/${sheetId}/rows`,
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rowId }),
+          },
+        );
+        const payload = (await response.json().catch(() => ({}))) as {
+          rowCount?: number;
+        };
+        if (!response.ok) throw new Error("ROW_DELETE_FAILED");
+        removeRowFromClient(sheetId, rowId, rowIndex, payload.rowCount);
+        setSaveStatus("행 삭제됨");
+      } catch {
+        setSaveStatus("행 삭제 실패 · 다시 시도하세요");
+      } finally {
+        setDeletingNormalizedRowKeys((current) =>
+          current.filter((key) => key !== rowKey),
+        );
+      }
+      return;
+    }
+    removeRowFromClient(sheetId, rowId, rowIndex);
   }
 
   function startColumnCreation() {
@@ -4374,8 +4555,32 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     const previous = current.find((field) => field.id === nextField.id);
     return current.map((field) => {
       if (field.id === nextField.id) return nextField;
-      if (!previous || previous.name === nextField.name || !isArithmeticField(field))
+      if (!previous || previous.name === nextField.name)
         return field;
+      if (isConditionalSumField(field))
+        return {
+          ...field,
+          valueColumn:
+            field.sourceSheetId === previous.resultSheetId &&
+            field.valueColumn === previous.name
+              ? nextField.name
+              : field.valueColumn,
+          conditions: field.conditions.map((condition) => ({
+            ...condition,
+            column:
+              (condition.sheetId ?? field.sourceSheetId) ===
+                previous.resultSheetId && condition.column === previous.name
+                ? nextField.name
+                : condition.column,
+            operand:
+              condition.operand.kind === "currentRowField" &&
+              field.resultSheetId === previous.resultSheetId &&
+              condition.operand.column === previous.name
+                ? { ...condition.operand, column: nextField.name }
+                : condition.operand,
+          })),
+        };
+      if (!isArithmeticField(field)) return field;
       const renameFormulaReference = (formula: FormulaToken[]) =>
         formula.map((token) =>
           token.kind === "field" &&
@@ -4511,7 +4716,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   function selectConditionalSumSource(sheetId: string) {
     const target = aggregateSheetPaths.find(({ sheet }) => sheet.id === sheetId);
     if (!target) return;
-    const valueColumn = numericColumns(target.sheet)[0] ?? "";
+    const valueColumn = numericFieldNames(target.sheet)[0] ?? "";
     setConditionalSumDraft((current) =>
       current && {
         ...current,
@@ -4523,7 +4728,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
             id: crypto.randomUUID(),
             sheetId: target.sheet.id,
             relationPath: target.relationPath,
-            column: target.sheet.columns[0] ?? "",
+            column: relationFieldNames(target.sheet)[0] ?? "",
             operator: "eq",
             operand: { kind: "literal", value: "" },
           },
@@ -4546,7 +4751,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
             id: crypto.randomUUID(),
             sheetId: target.sheet.id,
             relationPath: target.relationPath,
-            column: target.sheet.columns[0] ?? "",
+            column: relationFieldNames(target.sheet)[0] ?? "",
             operator: "eq",
             operand: { kind: "literal", value: "" },
           },
@@ -4702,19 +4907,35 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
 
   function deleteCalculatedField(field: CalculatedField) {
     const dependents = calculatedFields.filter(
-      (candidate) =>
-        isArithmeticField(candidate) &&
-        [
-          candidate.formula,
-          ...(candidate.condition?.cases.map((item) => item.formula) ?? []),
-        ].some((formula) =>
-          formula.some(
-            (token) =>
-              token.kind === "field" &&
-              token.sheetId === field.resultSheetId &&
-              token.column === field.name,
-          ),
-        ),
+      (candidate) => {
+        if (isConditionalSumField(candidate))
+          return (
+            (candidate.sourceSheetId === field.resultSheetId &&
+              candidate.valueColumn === field.name) ||
+            candidate.conditions.some(
+              (condition) =>
+                ((condition.sheetId ?? candidate.sourceSheetId) ===
+                  field.resultSheetId && condition.column === field.name) ||
+                (condition.operand.kind === "currentRowField" &&
+                  candidate.resultSheetId === field.resultSheetId &&
+                  condition.operand.column === field.name),
+            )
+          );
+        return (
+          isArithmeticField(candidate) &&
+          [
+            candidate.formula,
+            ...(candidate.condition?.cases.map((item) => item.formula) ?? []),
+          ].some((formula) =>
+            formula.some(
+              (token) =>
+                token.kind === "field" &&
+                token.sheetId === field.resultSheetId &&
+                token.column === field.name,
+            ),
+          )
+        );
+      },
     );
     if (dependents.length > 0) {
       window.alert(
@@ -6404,7 +6625,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                             disabled={!canCreateConditionalSum}
                             onClick={() => {
                               const target = aggregateSheetPaths[0]!;
-                              const valueColumn = numericColumns(
+                              const valueColumn = numericFieldNames(
                                 target.sheet,
                               )[0]!;
                               setConditionalSumDraft({
@@ -6418,7 +6639,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                                     id: crypto.randomUUID(),
                                     sheetId: target.sheet.id,
                                     relationPath: target.relationPath,
-                                    column: target.sheet.columns[0]!,
+                                    column: relationFieldNames(target.sheet)[0]!,
                                     operator: "eq",
                                     operand: { kind: "literal", value: "" },
                                   },
@@ -6593,7 +6814,10 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                       <td className="row-actions">
                         <button
                           aria-label={`${rowIndex + 1}행 삭제`}
-                          onClick={() => deleteRow(rowIndex)}
+                          disabled={deletingNormalizedRowKeys.includes(
+                            `${activeSheet.id}:${activeSheet.rowIds[rowIndex]}`,
+                          )}
+                          onClick={() => void deleteRow(rowIndex)}
                         >
                           ×
                         </button>
@@ -6627,7 +6851,14 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                         2
                       }
                     >
-                      <button onClick={addRow}>새 행 추가</button>
+                      <button
+                        disabled={addingNormalizedSheetId === activeSheet.id}
+                        onClick={() => void addRow()}
+                      >
+                        {addingNormalizedSheetId === activeSheet.id
+                          ? "새 행 저장 중…"
+                          : "새 행 추가"}
+                      </button>
                     </td>
                   </tr>
                 </tbody>
@@ -7549,6 +7780,9 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
               previewRelations,
               sheets,
               rowId,
+              [...calculatedFields, previewField],
+              filterSelections,
+              new Set(),
             ),
           }));
           return (
@@ -7619,8 +7853,17 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                           )
                         }
                       >
-                        {numericColumns(sourceSheet).map((column) => (
-                          <option key={column}>{column}</option>
+                        {numericFieldNames(sourceSheet).map((column) => (
+                          <option key={column} value={column}>
+                            {column}
+                            {calculatedFields.some(
+                              (field) =>
+                                field.resultSheetId === sourceSheet.id &&
+                                field.name === column,
+                            )
+                              ? " · 계산 결과"
+                              : ""}
+                          </option>
                         ))}
                       </select>
                     </label>
@@ -7681,7 +7924,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                           >
                             {conditionalSheetPaths.flatMap(
                               ({ sheet, relationPath }) =>
-                                sheet.columns.map((column) => (
+                                relationFieldNames(sheet).map((column) => (
                                   <option
                                     key={`${sheet.id}:${column}`}
                                     value={JSON.stringify([
@@ -7749,7 +7992,9 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                                                     ? {
                                                         kind: "currentRowField",
                                                         column:
-                                                          activeSheet.columns[0] ??
+                                                          relationFieldNames(
+                                                            activeSheet,
+                                                          )[0] ??
                                                           "",
                                                       }
                                                     : {
@@ -7820,8 +8065,17 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                                     )
                                   }
                                 >
-                                  {activeSheet.columns.map((column) => (
-                                    <option key={column}>{column}</option>
+                                  {relationFieldNames(activeSheet).map((column) => (
+                                    <option key={column} value={column}>
+                                      {column}
+                                      {calculatedFields.some(
+                                        (field) =>
+                                          field.resultSheetId === activeSheet.id &&
+                                          field.name === column,
+                                      )
+                                        ? " · 계산 결과"
+                                        : ""}
+                                    </option>
                                   ))}
                                 </select>
                               )}

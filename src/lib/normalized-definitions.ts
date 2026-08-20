@@ -97,7 +97,8 @@ export function deserializeCalculatedField(input: {
           id: text(metaCondition.id) ?? crypto.randomUUID(),
           sheetId: text(metaCondition.sheetId) ?? undefined,
           ...(Array.isArray(metaCondition.relationPath) ? { relationPath: metaCondition.relationPath } : {}),
-          column: condition.sourceColumn?.name ?? "",
+          column:
+            text(metaCondition.column) ?? condition.sourceColumn?.name ?? "",
           operator: condition.operator,
           operand: condition.operandType === "currentRowField"
             ? { kind: "currentRowField", column: condition.operandValue ?? "" }
@@ -305,6 +306,10 @@ export async function syncNormalizedDefinitions(
       definition: field,
     };
   });
+  const hasCalculatedField = (sheetId: string, name: string) =>
+    fieldRows.some(
+      (field) => field.resultSheetId === sheetId && field.name === name,
+    );
 
   await transaction.calculationCondition.deleteMany({ where: { calculatedField: { sheet: { projectId } } } });
   await transaction.calculationRule.deleteMany({ where: { calculatedField: { sheet: { projectId } } } });
@@ -321,16 +326,34 @@ export async function syncNormalizedDefinitions(
       arguments: argumentsValue as Prisma.InputJsonValue,
     });
     if (field.kind === "conditionalSum") {
+      const sourceSheetId = text(definition.sourceSheetId) ?? "";
+      const valueColumn = text(definition.valueColumn) ?? "";
+      if (
+        !sheetMap.has(sourceSheetId) ||
+        (!findColumn(sourceSheetId, valueColumn) &&
+          !hasCalculatedField(sourceSheetId, valueColumn))
+      )
+        throw new NormalizedDefinitionError(
+          "ORPHAN_CALCULATION_VALUE",
+          "조건부 합계가 없는 원본 컬럼 또는 계산 필드를 참조합니다.",
+        );
       addRule("conditional_sum", {
-        sourceSheetId: definition.sourceSheetId,
+        sourceSheetId,
         ...(Array.isArray(definition.relationPath) ? { relationPath: definition.relationPath } : {}),
-        valueColumn: definition.valueColumn,
+        valueColumn,
       });
       for (const [conditionOrder, condition] of records(definition.conditions).entries()) {
-        const conditionSheetId = text(condition.sheetId) ?? text(definition.sourceSheetId) ?? "";
-        const sourceColumn = findColumn(conditionSheetId, text(condition.column) ?? "");
-        if (!sourceColumn)
-          throw new NormalizedDefinitionError("ORPHAN_CALCULATION_CONDITION", "계산 조건이 없는 컬럼을 참조합니다.");
+        const conditionSheetId = text(condition.sheetId) ?? sourceSheetId;
+        const conditionColumn = text(condition.column) ?? "";
+        const sourceColumn = findColumn(conditionSheetId, conditionColumn);
+        if (
+          !sourceColumn &&
+          !hasCalculatedField(conditionSheetId, conditionColumn)
+        )
+          throw new NormalizedDefinitionError(
+            "ORPHAN_CALCULATION_CONDITION",
+            "계산 조건이 없는 원본 컬럼 또는 계산 필드를 참조합니다.",
+          );
         const operand = optionalRecord(condition.operand);
         conditions.push({
           id: uuid(condition.id) ?? crypto.randomUUID(),
@@ -338,11 +361,12 @@ export async function syncNormalizedDefinitions(
           operator: text(condition.operator) ?? "eq",
           operandType: text(operand.kind) ?? "literal",
           operandValue: text(operand.value) ?? text(operand.column),
-          sourceColumnId: sourceColumn.id,
+          sourceColumnId: sourceColumn?.id ?? null,
         });
         addRule(`condition_meta:${conditionOrder}`, {
           id: condition.id,
           sheetId: condition.sheetId,
+          column: conditionColumn,
           ...(Array.isArray(condition.relationPath) ? { relationPath: condition.relationPath } : {}),
         });
       }
