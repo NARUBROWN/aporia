@@ -50,8 +50,9 @@ export async function GET(
   const cursor = cursorValue && /^\d+$/.test(cursorValue) ? BigInt(cursorValue) : BigInt(-1);
   const tableName = quoteRegisteredIdentifier(sheet.physicalTableName);
   const columnNames = sheet.columns.map((column) => quoteRegisteredIdentifier(column.physicalColumnName));
+  const selectedColumns = columnNames.map((columnName) => `sheet_data.${columnName}`);
   const result = await postgres.query<Record<string, unknown>>(
-    `SELECT _row_id::text, _row_order::text, ${columnNames.join(", ")} FROM project_data.${tableName} WHERE _row_order > $1 ORDER BY _row_order ASC LIMIT $2`,
+    `SELECT sheet_data._row_id::text, sheet_data._row_order::text, ${selectedColumns.join(", ")} FROM project_data.${tableName} AS sheet_data WHERE sheet_data._row_order > $1 ORDER BY sheet_data._row_order ASC LIMIT $2`,
     [cursor.toString(), limit],
   );
   const rows = result.rows.map((row) => ({
