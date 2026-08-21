@@ -4588,15 +4588,25 @@ svg {
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-inline: contain;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 65%, transparent) transparent;
   border-bottom: 1px solid var(--line);
   background: var(--soft);
   padding-left: 10px;
 }
 .sheet-tabs::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+  height: 7px;
+}
+.sheet-tabs::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+}
+.sheet-tabs::-webkit-scrollbar-thumb {
+  border: 1px solid color-mix(in srgb, var(--soft) 75%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 65%, transparent);
+}
+.sheet-tabs::-webkit-scrollbar-thumb:hover {
+  background: var(--green);
 }
 .sheet-tabs > * {
   flex-shrink: 0;
