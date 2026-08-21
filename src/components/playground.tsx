@@ -14,7 +14,15 @@ import {
 } from "@/lib/sheet-filtering";
 import { expandRelatedSheetIds } from "@/lib/normalized-sheet-loading";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { Icons } from "@/components/icons";
@@ -125,6 +133,75 @@ function sheetsFromNormalizedPayload(payload: NormalizedSheetPayload): Sheet[] {
 
 function sheetRowCount(sheet: Sheet) {
   return sheet.normalized ? (sheet.rowCount ?? 0) : sheet.rows.length;
+}
+
+function SheetSearchPopover({
+  sheets,
+  activeSheetId,
+  onSelect,
+  onClose,
+}: {
+  sheets: Sheet[];
+  activeSheetId: string;
+  onSelect: (sheetId: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
+  const indexedSheets = useMemo(
+    () =>
+      sheets.map((sheet) => ({
+        sheet,
+        normalizedName: sheet.name.toLocaleLowerCase("ko-KR"),
+      })),
+    [sheets],
+  );
+  const results = useMemo(() => {
+    const normalizedQuery = deferredQuery.trim().toLocaleLowerCase("ko-KR");
+    return indexedSheets
+      .filter(({ normalizedName }) => normalizedName.includes(normalizedQuery))
+      .map(({ sheet }) => sheet);
+  }, [deferredQuery, indexedSheets]);
+
+  return (
+    <div
+      className="sheet-search-popover"
+      role="dialog"
+      aria-label="시트 찾기"
+    >
+      <label>
+        <Icons.search />
+        <input
+          autoFocus
+          aria-label="시트 이름 검색"
+          placeholder="시트 이름 검색"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") onClose();
+          }}
+        />
+      </label>
+      <div className="sheet-search-results">
+        {results.length === 0 ? (
+          <p>일치하는 시트가 없습니다.</p>
+        ) : (
+          results.map((sheet) => (
+            <button
+              key={sheet.id}
+              type="button"
+              className={sheet.id === activeSheetId ? "active" : ""}
+              onClick={() => onSelect(sheet.id)}
+            >
+              <span className="table-dot" />
+              <strong>{sheet.name}</strong>
+              <small>{sheetRowCount(sheet)}개 행</small>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
 }
 type DisplayBinding = {
   sheetId: string;
@@ -2686,7 +2763,6 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     useState<SheetDockMode>("normal");
   const [sheetViewMode, setSheetViewMode] = useState<SheetViewMode>("grid");
   const [sheetSearchOpen, setSheetSearchOpen] = useState(false);
-  const [sheetSearchQuery, setSheetSearchQuery] = useState("");
   const normalSheetDockHeightRef = useRef(190);
   const panRef = useRef<{
     startX: number;
@@ -2711,11 +2787,6 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     emptySheet;
   const activeSheetRowsLoading = loadingNormalizedSheetIds.includes(
     activeSheet.id,
-  );
-  const sheetSearchResults = sheets.filter((sheet) =>
-    sheet.name
-      .toLocaleLowerCase("ko-KR")
-      .includes(sheetSearchQuery.trim().toLocaleLowerCase("ko-KR")),
   );
   const activeCalculatedFields = calculatedFields.filter(
     (field) => field.resultSheetId === activeSheet.id,
@@ -2918,6 +2989,30 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
         if (typeof payload.project?.version === "number")
           projectVersionRef.current = payload.project.version;
         return payload;
+      };
+      const result = projectSaveQueueRef.current.then(run, run);
+      projectSaveQueueRef.current = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
+    [projectId],
+  );
+
+  const enqueueProjectSheetDelete = useCallback(
+    (sheetId: string) => {
+      const run = async () => {
+        const response = await fetch(
+          `/api/projects/${projectId}/sheets/${sheetId}`,
+          { method: "DELETE" },
+        );
+        if (!response.ok && response.status !== 404) {
+          const payload = (await response.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          throw new Error(payload.error ?? "SHEET_DELETE_FAILED");
+        }
       };
       const result = projectSaveQueueRef.current.then(run, run);
       projectSaveQueueRef.current = result.then(
@@ -3931,13 +4026,23 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     setEditingSheetId(null);
   }
 
-  function deleteSheet(sheetToDelete: Sheet = activeSheet) {
+  async function deleteSheet(sheetToDelete: Sheet = activeSheet) {
     if (
       !window.confirm(
         `'${sheetToDelete.name}' 시트를 삭제할까요? 연결된 컴포넌트의 데이터 설정도 해제됩니다.`,
       )
     )
       return;
+    if (projectId) {
+      setSaveStatus("시트 삭제 중");
+      try {
+        await flushNormalizedCellChanges();
+        await enqueueProjectSheetDelete(sheetToDelete.id);
+      } catch {
+        setSaveStatus("시트 삭제 실패 · 다시 시도하세요");
+        return;
+      }
+    }
     const remaining = sheets.filter((sheet) => sheet.id !== sheetToDelete.id);
     const nextSheet =
       activeSheet.id === sheetToDelete.id
@@ -3952,6 +4057,17 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     );
     setActiveSheetId(nextSheet?.id ?? "");
     setEditingSheetId(null);
+    normalizedRowsLoadingRef.current.delete(sheetToDelete.id);
+    setLoadingNormalizedSheetIds((current) =>
+      current.filter((sheetId) => sheetId !== sheetToDelete.id),
+    );
+    setCellValidationErrors((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([key]) => !key.startsWith(`${sheetToDelete.id}:`),
+        ),
+      ),
+    );
     setDisplayBindings((current) =>
       Object.fromEntries(
         Object.entries(current).filter(
@@ -4010,6 +4126,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
         relationType: "1:1",
       };
     });
+    if (projectId) setSaveStatus("시트 삭제됨");
   }
 
   function updateCell(rowIndex: number, columnIndex: number, value: string) {
@@ -5205,7 +5322,6 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
 
   function selectSearchedSheet(sheetId: string) {
     setActiveSheetId(sheetId);
-    setSheetSearchQuery("");
     setSheetSearchOpen(false);
   }
 
@@ -6348,7 +6464,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
               <button
                 className="sheet-tab-close"
                 aria-label={`${sheet.name} 시트 삭제`}
-                onClick={() => deleteSheet(sheet)}
+                onClick={() => void deleteSheet(sheet)}
               >
                 ×
               </button>
@@ -6367,43 +6483,12 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
           <span className="sheet-summary">테이블 {sheets.length}개</span>
         </div>
         {sheetSearchOpen && (
-          <div
-            className="sheet-search-popover"
-            role="dialog"
-            aria-label="시트 찾기"
-          >
-            <label>
-              <Icons.search />
-              <input
-                autoFocus
-                aria-label="시트 이름 검색"
-                placeholder="시트 이름 검색"
-                value={sheetSearchQuery}
-                onChange={(event) => setSheetSearchQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") setSheetSearchOpen(false);
-                }}
-              />
-            </label>
-            <div className="sheet-search-results">
-              {sheetSearchResults.length === 0 ? (
-                <p>일치하는 시트가 없습니다.</p>
-              ) : (
-                sheetSearchResults.map((sheet) => (
-                  <button
-                    key={sheet.id}
-                    type="button"
-                    className={sheet.id === activeSheet.id ? "active" : ""}
-                    onClick={() => selectSearchedSheet(sheet.id)}
-                  >
-                    <span className="table-dot" />
-                    <strong>{sheet.name}</strong>
-                    <small>{sheetRowCount(sheet)}개 행</small>
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
+          <SheetSearchPopover
+            sheets={sheets}
+            activeSheetId={activeSheet.id}
+            onSelect={selectSearchedSheet}
+            onClose={() => setSheetSearchOpen(false)}
+          />
         )}
         {sheets.length === 0 ? (
           <div className="empty-sheet-state">
