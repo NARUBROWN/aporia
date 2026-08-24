@@ -12,7 +12,11 @@ import {
   type ActiveSheetFilter,
   type FilterTarget,
 } from "@/lib/sheet-filtering";
-import { expandRelatedSheetIds } from "@/lib/normalized-sheet-loading";
+import {
+  expandRelatedSheetIds,
+  needsInitialNormalizedRows,
+  virtualRowWindow,
+} from "@/lib/normalized-sheet-loading";
 
 import {
   Fragment,
@@ -2763,6 +2767,15 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     useState<SheetDockMode>("normal");
   const [sheetViewMode, setSheetViewMode] = useState<SheetViewMode>("grid");
   const [sheetSearchOpen, setSheetSearchOpen] = useState(false);
+  const sheetGridRef = useRef<HTMLDivElement | null>(null);
+  const sheetGridLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const sheetGridScrollFrameRef = useRef<number | null>(null);
+  const pendingSheetGridViewportRef = useRef({ scrollTop: 0, height: 0 });
+  const lastSheetGridScrollTopRef = useRef(0);
+  const [sheetGridViewport, setSheetGridViewport] = useState({
+    scrollTop: 0,
+    height: 0,
+  });
   const normalSheetDockHeightRef = useRef(190);
   const panRef = useRef<{
     startX: number;
@@ -2791,6 +2804,11 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   const activeCalculatedFields = calculatedFields.filter(
     (field) => field.resultSheetId === activeSheet.id,
   );
+  const visibleSheetRows = virtualRowWindow({
+    rowCount: activeSheet.rows.length,
+    scrollTop: sheetGridViewport.scrollTop,
+    viewportHeight: sheetGridViewport.height,
+  });
   const numericFieldNames = (sheet: Sheet) => [
     ...numericColumns(sheet),
     ...calculatedFields
@@ -3516,6 +3534,60 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   );
 
   useEffect(() => {
+    if (sheetViewMode !== "grid") return;
+    const element = sheetGridRef.current;
+    if (!element) return;
+    element.scrollTop = 0;
+    lastSheetGridScrollTopRef.current = 0;
+    const updateViewport = () => {
+      const next = { scrollTop: element.scrollTop, height: element.clientHeight };
+      pendingSheetGridViewportRef.current = next;
+      setSheetGridViewport(next);
+    };
+    updateViewport();
+    const observer = new ResizeObserver(updateViewport);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [activeSheet.id, sheetViewMode]);
+
+  useEffect(() => {
+    if (
+      sheetViewMode !== "grid" ||
+      !activeSheet.normalized ||
+      !activeSheet.nextCursor ||
+      activeSheetRowsLoading
+    )
+      return;
+    const root = sheetGridRef.current;
+    const target = sheetGridLoadMoreRef.current;
+    if (!root || !target) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting)
+          void loadNormalizedRows(activeSheet.id, activeSheet.nextCursor);
+      },
+      { root, rootMargin: "120px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [
+    activeSheet.id,
+    activeSheet.nextCursor,
+    activeSheet.normalized,
+    activeSheetRowsLoading,
+    loadNormalizedRows,
+    sheetViewMode,
+  ]);
+
+  useEffect(
+    () => () => {
+      if (sheetGridScrollFrameRef.current !== null)
+        window.cancelAnimationFrame(sheetGridScrollFrameRef.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
     if (!hydrated) return;
     const requiredSheetIds = new Set<string>([activeSheet.id]);
     Object.values(displayBindings).forEach((binding) =>
@@ -3550,15 +3622,17 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     );
     const sheetsToLoad = sheets.filter(
       (sheet) =>
-        sheet.normalized &&
         hydratedSheetIds.has(sheet.id) &&
-        (sheet.rowCount ?? 0) > sheet.rows.length &&
-        (sheet.rows.length === 0 || Boolean(sheet.nextCursor)),
+        needsInitialNormalizedRows({
+          normalized: sheet.normalized,
+          rowCount: sheet.rowCount,
+          loadedRowCount: sheet.rows.length,
+        }),
     );
     if (sheetsToLoad.length === 0) return;
     const timeout = window.setTimeout(() => {
       sheetsToLoad.forEach((sheet) =>
-        void loadNormalizedRows(sheet.id, sheet.nextCursor),
+        void loadNormalizedRows(sheet.id),
       );
     }, 0);
     return () => window.clearTimeout(timeout);
@@ -6522,21 +6596,24 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
           ) : (
           <>
             <div
+              ref={sheetGridRef}
               className="sheet-grid-wrap"
               onScroll={(event) => {
                 const element = event.currentTarget;
-                const reachedBottom =
-                  element.scrollHeight - element.scrollTop - element.clientHeight < 120;
-                if (
-                  reachedBottom &&
-                  activeSheet.normalized &&
-                  activeSheet.nextCursor &&
-                  !activeSheetRowsLoading
-                )
-                  void loadNormalizedRows(
-                    activeSheet.id,
-                    activeSheet.nextCursor,
-                  );
+                if (element.scrollTop === lastSheetGridScrollTopRef.current)
+                  return;
+                lastSheetGridScrollTopRef.current = element.scrollTop;
+                pendingSheetGridViewportRef.current = {
+                  scrollTop: element.scrollTop,
+                  height: element.clientHeight,
+                };
+                if (sheetGridScrollFrameRef.current !== null) return;
+                sheetGridScrollFrameRef.current = window.requestAnimationFrame(
+                  () => {
+                    sheetGridScrollFrameRef.current = null;
+                    setSheetGridViewport(pendingSheetGridViewportRef.current);
+                  },
+                );
               }}
             >
               <table className="sheet-grid">
@@ -6832,7 +6909,23 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                   </tr>
                 </thead>
                 <tbody>
-                  {activeSheet.rows.map((row, rowIndex) => (
+                  {visibleSheetRows.paddingTop > 0 && (
+                    <tr className="sheet-virtual-spacer" aria-hidden="true">
+                      <td
+                        colSpan={
+                          activeSheet.columns.length +
+                          activeCalculatedFields.length +
+                          3
+                        }
+                        style={{ height: visibleSheetRows.paddingTop }}
+                      />
+                    </tr>
+                  )}
+                  {activeSheet.rows
+                    .slice(visibleSheetRows.start, visibleSheetRows.end)
+                    .map((row, visibleRowIndex) => {
+                    const rowIndex = visibleSheetRows.start + visibleRowIndex;
+                    return (
                     <tr
                       key={
                         activeSheet.rowIds[rowIndex] ??
@@ -6967,7 +7060,20 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
+                  {visibleSheetRows.paddingBottom > 0 && (
+                    <tr className="sheet-virtual-spacer" aria-hidden="true">
+                      <td
+                        colSpan={
+                          activeSheet.columns.length +
+                          activeCalculatedFields.length +
+                          3
+                        }
+                        style={{ height: visibleSheetRows.paddingBottom }}
+                      />
+                    </tr>
+                  )}
                   {activeSheet.normalized &&
                     (activeSheetRowsLoading || activeSheet.nextCursor) && (
                       <tr className="sheet-loading-row">
@@ -7007,6 +7113,11 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                   </tr>
                 </tbody>
               </table>
+              <div
+                ref={sheetGridLoadMoreRef}
+                className="sheet-load-sentinel"
+                aria-hidden="true"
+              />
             </div>
             <footer className="sheet-footer">
               <span>
