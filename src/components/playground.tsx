@@ -17,6 +17,12 @@ import {
   needsInitialNormalizedRows,
   virtualRowWindow,
 } from "@/lib/normalized-sheet-loading";
+import {
+  isProjectVersionConflict,
+  readSaveResponse,
+  saveFailureLog,
+  type SaveFailureLog,
+} from "@/lib/save-failure";
 
 import {
   Fragment,
@@ -814,6 +820,32 @@ function isArithmeticField(
 
 export function isNumericCalculatedField(field: CalculatedField) {
   return !isTransformField(field) || transformOutputType(field) === "number";
+}
+
+function numericCalculatedFieldDependents(
+  target: CalculatedField,
+  fields: CalculatedField[],
+) {
+  return fields.filter((field) => {
+    if (field.id === target.id) return false;
+    if (isConditionalSumField(field))
+      return (
+        field.sourceSheetId === target.resultSheetId &&
+        field.valueColumn === target.name
+      );
+    if (!isArithmeticField(field)) return false;
+    return [
+      field.formula,
+      ...(field.condition?.cases.map((item) => item.formula) ?? []),
+    ].some((formula) =>
+      formula.some(
+        (token) =>
+          token.kind === "field" &&
+          token.sheetId === target.resultSheetId &&
+          token.column === target.name,
+      ),
+    );
+  });
 }
 
 function conditionalOperatorLabel(operator: ConditionalOperator) {
@@ -2737,6 +2769,8 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   const projectVersionRef = useRef<number | null>(null);
   const projectSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [saveStatus, setSaveStatus] = useState(isTemporary ? "저장되지 않는 임시 캔버스" : accessLevel === "view" ? "보기 전용" : "데이터베이스 연결 중");
+  const [saveFailure, setSaveFailure] = useState<SaveFailureLog | null>(null);
+  const [saveFailureCopied, setSaveFailureCopied] = useState(false);
   const [snapshotPanelOpen, setSnapshotPanelOpen] = useState(false);
   const [savedSnapshots, setSavedSnapshots] = useState<
     SavedProjectSnapshot[]
@@ -2759,6 +2793,16 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     canUndo: false,
     canRedo: false,
   });
+  const reportSaveFailure = useCallback(
+    (
+      error: unknown,
+      context: { operation: string; method: string; endpoint: string },
+    ) => {
+      setSaveFailure(saveFailureLog(error, context));
+      setSaveFailureCopied(false);
+    },
+    [],
+  );
   const undoProjectRef = useRef<() => void>(() => undefined);
   const redoProjectRef = useRef<() => void>(() => undefined);
   const manualSaveProjectRef = useRef<() => Promise<void>>(async () => undefined);
@@ -2981,10 +3025,16 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   }
 
   const enqueueProjectSave = useCallback(
-    (path: "" | "/snapshots", body: Record<string, unknown>) => {
+    (
+      path: "" | "/snapshots",
+      body: Record<string, unknown>,
+      operation = path === "/snapshots" ? "스냅샷 저장" : "프로젝트 저장",
+    ) => {
       const run = async () => {
-        const response = await fetch(`/api/projects/${projectId}${path}`, {
-          method: path === "/snapshots" ? "POST" : "PUT",
+        const endpoint = `/api/projects/${projectId}${path}`;
+        const method = path === "/snapshots" ? "POST" : "PUT";
+        const response = await fetch(endpoint, {
+          method,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ...body,
@@ -2993,16 +3043,21 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
               : { baseVersion: projectVersionRef.current }),
           }),
         });
-        const payload = (await response.json().catch(() => ({}))) as {
+        let payload: {
           error?: string;
           project?: { version?: number };
         };
-        if (!response.ok) {
-          if (response.status === 409) {
+        try {
+          payload = await readSaveResponse(response, {
+            operation,
+            method,
+            endpoint,
+          });
+        } catch (error) {
+          if (isProjectVersionConflict(error)) {
             setSaveStatus("다른 변경사항이 먼저 저장됨 · 새로고침이 필요합니다");
-            throw new Error("PROJECT_VERSION_CONFLICT");
           }
-          throw new Error(payload.error ?? "PROJECT_SAVE_FAILED");
+          throw error;
         }
         if (typeof payload.project?.version === "number")
           projectVersionRef.current = payload.project.version;
@@ -3021,16 +3076,17 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   const enqueueProjectSheetDelete = useCallback(
     (sheetId: string) => {
       const run = async () => {
+        const endpoint = `/api/projects/${projectId}/sheets/${sheetId}`;
         const response = await fetch(
-          `/api/projects/${projectId}/sheets/${sheetId}`,
+          endpoint,
           { method: "DELETE" },
         );
-        if (!response.ok && response.status !== 404) {
-          const payload = (await response.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          throw new Error(payload.error ?? "SHEET_DELETE_FAILED");
-        }
+        if (response.status === 404) return;
+        await readSaveResponse(response, {
+          operation: "시트 삭제 저장",
+          method: "DELETE",
+          endpoint,
+        });
       };
       const result = projectSaveQueueRef.current.then(run, run);
       projectSaveQueueRef.current = result.then(
@@ -3071,18 +3127,28 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       return;
     }
     setSaveStatus("프로젝트 이름 저장 중");
+    const endpoint = `/api/projects/${projectId}`;
     try {
-      const response = await fetch(`/api/projects/${projectId}`, {
+      const response = await fetch(endpoint, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
-      if (!response.ok) throw new Error("프로젝트 이름을 저장하지 못했습니다.");
+      await readSaveResponse(response, {
+        operation: "프로젝트 이름 저장",
+        method: "PATCH",
+        endpoint,
+      });
       setSaveStatus("프로젝트 이름 저장됨");
-    } catch {
+    } catch (error) {
       setDisplayProjectName(previousName);
       setProjectNameDraft(previousName);
       setSaveStatus("프로젝트 이름 저장 실패 · 다시 시도하세요");
+      reportSaveFailure(error, {
+        operation: "프로젝트 이름 저장",
+        method: "PATCH",
+        endpoint,
+      });
     }
   }
 
@@ -3118,8 +3184,9 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       }
       await Promise.all(
         [...changesBySheet.entries()].map(async ([sheetId, sheetChanges]) => {
+          const endpoint = `/api/projects/${projectId}/sheets/${sheetId}/rows`;
           const response = await fetch(
-            `/api/projects/${projectId}/sheets/${sheetId}/rows`,
+            endpoint,
             {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
@@ -3132,7 +3199,11 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
               }),
             },
           );
-          if (!response.ok) throw new Error("시트 셀을 저장하지 못했습니다.");
+          await readSaveResponse(response, {
+            operation: "시트 셀 저장",
+            method: "PATCH",
+            endpoint,
+          });
           for (const [key, change] of sheetChanges) {
             if (
               pendingNormalizedCellChangesRef.current.get(key)?.value ===
@@ -3154,11 +3225,16 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       window.clearTimeout(normalizedCellSaveTimeoutRef.current);
     normalizedCellSaveTimeoutRef.current = window.setTimeout(() => {
       normalizedCellSaveTimeoutRef.current = null;
-      void flushNormalizedCellChanges().catch(() =>
-        setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요"),
-      );
+      void flushNormalizedCellChanges().catch((error) => {
+        setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요");
+        reportSaveFailure(error, {
+          operation: "시트 셀 저장",
+          method: "PATCH",
+          endpoint: `/api/projects/${projectId}/sheets/:sheetId/rows`,
+        });
+      });
     }, 600);
-  }, [flushNormalizedCellChanges]);
+  }, [flushNormalizedCellChanges, projectId, reportSaveFailure]);
 
   async function saveProjectSnapshot() {
     if (!projectId) {
@@ -3173,19 +3249,26 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     setSaveStatus("프로젝트와 스냅샷 저장 중");
     try {
       await flushNormalizedCellChanges();
-      await enqueueProjectSave("/snapshots", {
-        document: currentProjectDocument(),
-      });
+      await enqueueProjectSave(
+        "/snapshots",
+        { document: currentProjectDocument() },
+        "스냅샷 저장",
+      );
       await loadSavedSnapshots();
       setSaveStatus("프로젝트와 스냅샷 저장됨");
     } catch (error) {
       setSnapshotError(
-        error instanceof Error && error.message === "PROJECT_VERSION_CONFLICT"
+        isProjectVersionConflict(error)
           ? "다른 변경사항이 먼저 저장되었습니다. 새로고침 후 다시 시도해주세요."
           : "스냅샷 저장에 실패했습니다.",
       );
-      if (!(error instanceof Error && error.message === "PROJECT_VERSION_CONFLICT"))
+      if (!isProjectVersionConflict(error))
         setSaveStatus("스냅샷 저장 실패 · 다시 시도하세요");
+      reportSaveFailure(error, {
+        operation: "스냅샷 저장",
+        method: "POST",
+        endpoint: `/api/projects/${projectId}/snapshots`,
+      });
     } finally {
       setSnapshotLoading(false);
     }
@@ -3200,16 +3283,25 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     setSaveStatus("수동 저장 중");
     try {
       await flushNormalizedCellChanges();
-      await enqueueProjectSave("", {
-        document: currentProjectDocument(),
-        snapshotReason: "manual_save",
-      });
+      await enqueueProjectSave(
+        "",
+        {
+          document: currentProjectDocument(),
+          snapshotReason: "manual_save",
+        },
+        "수동 저장",
+      );
       commitLatestProjectSnapshot();
       await loadSavedSnapshots();
       setSaveStatus("수동 저장됨");
     } catch (error) {
-      if (!(error instanceof Error && error.message === "PROJECT_VERSION_CONFLICT"))
+      if (!isProjectVersionConflict(error))
         setSaveStatus("수동 저장 실패 · 다시 시도하세요");
+      reportSaveFailure(error, {
+        operation: "수동 저장",
+        method: "PUT",
+        endpoint: `/api/projects/${projectId}`,
+      });
     } finally {
       setManualSaveLoading(false);
     }
@@ -3255,24 +3347,24 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     setRestoringSnapshotId(snapshot.id);
     setSnapshotError("");
     setSaveStatus("스냅샷 복원 중");
+    const endpoint = `/api/projects/${projectId}/snapshots/${snapshot.id}`;
     try {
       const response = await fetch(
-        `/api/projects/${projectId}/snapshots/${snapshot.id}`,
+        endpoint,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ baseVersion: projectVersionRef.current }),
         },
       );
-      const payload = (await response.json()) as {
+      const payload = await readSaveResponse<{
         error?: string;
         project?: { document?: unknown; version?: number };
-      };
-      if (!response.ok) {
-        if (response.status === 409)
-          throw new Error("PROJECT_VERSION_CONFLICT");
-        throw new Error("스냅샷을 복원하지 못했습니다.");
-      }
+      }>(response, {
+        operation: "스냅샷 복원",
+        method: "POST",
+        endpoint,
+      });
       if (typeof payload.project?.version === "number")
         projectVersionRef.current = payload.project.version;
       if (!isProjectSnapshot(payload.project?.document))
@@ -3311,17 +3403,22 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       setSaveStatus("스냅샷에서 복원됨");
     } catch (error) {
       setSnapshotError(
-        error instanceof Error && error.message === "PROJECT_VERSION_CONFLICT"
+        isProjectVersionConflict(error)
           ? "다른 변경사항이 먼저 저장되었습니다. 새로고침 후 다시 시도해주세요."
           : error instanceof Error
             ? error.message
             : "스냅샷 복원에 실패했습니다.",
       );
       setSaveStatus(
-        error instanceof Error && error.message === "PROJECT_VERSION_CONFLICT"
+        isProjectVersionConflict(error)
           ? "다른 변경사항이 먼저 저장됨 · 새로고침이 필요합니다"
           : "스냅샷 복원 실패 · 다시 시도하세요",
       );
+      reportSaveFailure(error, {
+        operation: "스냅샷 복원",
+        method: "POST",
+        endpoint,
+      });
     } finally {
       setRestoringSnapshotId("");
     }
@@ -3749,7 +3846,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     const timeout = window.setTimeout(() => {
       lastProjectSavePayloadRef.current = payload;
       setSaveStatus("서버에 저장 중");
-      enqueueProjectSave("", requestBody)
+      enqueueProjectSave("", requestBody, "프로젝트 자동 저장")
         .then((response) => {
           void response;
           setSaveStatus("서버에 저장됨");
@@ -3757,8 +3854,13 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
         .catch((error: unknown) => {
           if (lastProjectSavePayloadRef.current === payload)
             lastProjectSavePayloadRef.current = "";
-          if (!(error instanceof Error && error.message === "PROJECT_VERSION_CONFLICT"))
+          if (!isProjectVersionConflict(error))
             setSaveStatus("저장 실패 · 다시 시도하세요");
+          reportSaveFailure(error, {
+            operation: "프로젝트 자동 저장",
+            method: "PUT",
+            endpoint: `/api/projects/${projectId}`,
+          });
         });
     }, 700);
     return () => window.clearTimeout(timeout);
@@ -3773,6 +3875,7 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
     hydrated,
     pages,
     projectId,
+    reportSaveFailure,
     enqueueProjectSave,
     sheetRelations,
     sheetFolders,
@@ -4112,8 +4215,13 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       try {
         await flushNormalizedCellChanges();
         await enqueueProjectSheetDelete(sheetToDelete.id);
-      } catch {
+      } catch (error) {
         setSaveStatus("시트 삭제 실패 · 다시 시도하세요");
+        reportSaveFailure(error, {
+          operation: "시트 삭제 저장",
+          method: "DELETE",
+          endpoint: `/api/projects/${projectId}/sheets/${sheetToDelete.id}`,
+        });
         return;
       }
     }
@@ -4266,17 +4374,21 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       if (addingNormalizedSheetId === sheetId) return;
       setAddingNormalizedSheetId(sheetId);
       setSaveStatus("새 행 저장 중");
+      const endpoint = `/api/projects/${projectId}/sheets/${sheetId}/rows`;
       try {
         const response = await fetch(
-          `/api/projects/${projectId}/sheets/${sheetId}/rows`,
+          endpoint,
           { method: "POST" },
         );
-        const payload = (await response.json().catch(() => ({}))) as {
+        const payload = await readSaveResponse<{
           row?: { id?: string; values?: string[] };
           rowCount?: number;
-        };
+        }>(response, {
+          operation: "새 행 저장",
+          method: "POST",
+          endpoint,
+        });
         if (
-          !response.ok ||
           typeof payload.row?.id !== "string" ||
           !Array.isArray(payload.row.values)
         )
@@ -4297,8 +4409,13 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
           ),
         );
         setSaveStatus("새 행 저장됨");
-      } catch {
+      } catch (error) {
         setSaveStatus("새 행 저장 실패 · 다시 시도하세요");
+        reportSaveFailure(error, {
+          operation: "새 행 저장",
+          method: "POST",
+          endpoint,
+        });
       } finally {
         setAddingNormalizedSheetId((current) =>
           current === sheetId ? "" : current,
@@ -4393,27 +4510,36 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
       if (deletingNormalizedRowKeys.includes(rowKey)) return;
       setDeletingNormalizedRowKeys((current) => [...current, rowKey]);
       setSaveStatus("행 삭제 중");
+      const endpoint = `/api/projects/${projectId}/sheets/${sheetId}/rows`;
       try {
         for (const key of pendingNormalizedCellChangesRef.current.keys())
           if (key.startsWith(`${sheetId}:${rowId}:`))
             pendingNormalizedCellChangesRef.current.delete(key);
         await flushNormalizedCellChanges();
         const response = await fetch(
-          `/api/projects/${projectId}/sheets/${sheetId}/rows`,
+          endpoint,
           {
             method: "DELETE",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ rowId }),
           },
         );
-        const payload = (await response.json().catch(() => ({}))) as {
+        const payload = await readSaveResponse<{
           rowCount?: number;
-        };
-        if (!response.ok) throw new Error("ROW_DELETE_FAILED");
+        }>(response, {
+          operation: "행 삭제 저장",
+          method: "DELETE",
+          endpoint,
+        });
         removeRowFromClient(sheetId, rowId, rowIndex, payload.rowCount);
         setSaveStatus("행 삭제됨");
-      } catch {
+      } catch (error) {
         setSaveStatus("행 삭제 실패 · 다시 시도하세요");
+        reportSaveFailure(error, {
+          operation: "행 삭제 저장",
+          method: "DELETE",
+          endpoint,
+        });
       } finally {
         setDeletingNormalizedRowKeys((current) =>
           current.filter((key) => key !== rowKey),
@@ -4880,6 +5006,16 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
   function saveTransformField() {
     if (!transformDraft?.name.trim() || !transformDraft.sourceColumn) return;
     const name = transformDraft.name.trim();
+    const existingField = calculatedFields.find(
+      (field) => field.id === editingCalculatedFieldId,
+    );
+    if (
+      existingField &&
+      numericCalculatedFieldDependents(existingField, calculatedFields).length >
+        0 &&
+      transformDraft.outputType !== "number"
+    )
+      return;
     const candidateField: TransformCalculatedField = {
       ...transformDraft,
       id: editingCalculatedFieldId ?? "transform-validation",
@@ -5700,6 +5836,68 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
             )}
           </div>
         </aside>
+      )}
+
+      {saveFailure && (
+        <div
+          className="relation-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSaveFailure(null);
+          }}
+        >
+          <section
+            className="relation-modal save-failure-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="save-failure-title"
+          >
+            <header>
+              <div>
+                <span>!</span>
+                <strong id="save-failure-title">저장 실패 상세 로그</strong>
+              </div>
+              <button
+                type="button"
+                aria-label="저장 실패 로그 닫기"
+                onClick={() => setSaveFailure(null)}
+              >
+                ×
+              </button>
+            </header>
+            <section className="save-failure-summary">
+              <dl>
+                <div><dt>작업</dt><dd>{saveFailure.operation}</dd></div>
+                <div><dt>요청</dt><dd>{saveFailure.method} {saveFailure.endpoint}</dd></div>
+                <div><dt>상태</dt><dd>{saveFailure.status ? `${saveFailure.status} ${saveFailure.statusText ?? ""}`.trim() : "응답 없음"}</dd></div>
+                <div><dt>오류 코드</dt><dd>{saveFailure.code ?? "UNKNOWN_ERROR"}</dd></div>
+                <div><dt>발생 시각</dt><dd>{saveFailure.occurredAt}</dd></div>
+              </dl>
+              <p>{saveFailure.message}</p>
+              <pre>{JSON.stringify(saveFailure, null, 2)}</pre>
+            </section>
+            <footer>
+              <button type="button" onClick={() => setSaveFailure(null)}>
+                닫기
+              </button>
+              <button
+                type="button"
+                className="confirm"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(
+                      JSON.stringify(saveFailure, null, 2),
+                    );
+                    setSaveFailureCopied(true);
+                  } catch {
+                    setSaveFailureCopied(false);
+                  }
+                }}
+              >
+                {saveFailureCopied ? "복사됨" : "로그 복사"}
+              </button>
+            </footer>
+          </section>
+        </div>
       )}
 
       <div
@@ -6968,9 +7166,14 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                               }
                               onBlur={() => {
                                 if (activeSheet.normalized)
-                                  void flushNormalizedCellChanges().catch(() =>
-                                    setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요"),
-                                  );
+                                  void flushNormalizedCellChanges().catch((error) => {
+                                    setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요");
+                                    reportSaveFailure(error, {
+                                      operation: "시트 셀 저장",
+                                      method: "PATCH",
+                                      endpoint: `/api/projects/${projectId}/sheets/${activeSheet.id}/rows`,
+                                    });
+                                  });
                               }}
                             >
                               <option>예</option>
@@ -7008,9 +7211,14 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                               }
                               onBlur={() => {
                                 if (activeSheet.normalized)
-                                  void flushNormalizedCellChanges().catch(() =>
-                                    setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요"),
-                                  );
+                                  void flushNormalizedCellChanges().catch((error) => {
+                                    setSaveStatus("데이터 변경사항 저장 실패 · 다시 시도하세요");
+                                    reportSaveFailure(error, {
+                                      operation: "시트 셀 저장",
+                                      method: "PATCH",
+                                      endpoint: `/api/projects/${projectId}/sheets/${activeSheet.id}/rows`,
+                                    });
+                                  });
                               }}
                             />
                           )}
@@ -7965,6 +8173,13 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
           }));
           const typeIssues = transformTypeIssues(previewField, sheets);
           const firstTypeIssue = typeIssues[0];
+          const existingField = calculatedFields.find(
+            (field) => field.id === editingCalculatedFieldId,
+          );
+          const numericDependents = existingField
+            ? numericCalculatedFieldDependents(existingField, calculatedFields)
+            : [];
+          const mustRemainNumeric = numericDependents.length > 0;
           const updateStep = (id: string, next: TransformStep) => setTransformDraft((current) => current && ({ ...current, steps: current.steps.map((step) => step.id === id ? next : step) }));
           return (
             <div className="relation-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCalculatedFieldEditor(); }}>
@@ -7998,8 +8213,13 @@ export function Playground({ projectId, projectName, hasPassword, accessLevel = 
                     <small>5 · 결과 필드</small>
                     <div>
                       <label>필드 이름<input value={transformDraft.name} onChange={(event) => setTransformDraft((current) => current && ({ ...current, name: event.target.value }))} /></label>
-                      <label>결과 타입<select aria-label="정제 결과 타입" value={transformOutputType(previewField)} onChange={(event) => setTransformDraft((current) => current && ({ ...current, outputType: event.target.value as ColumnType }))}>{columnTypeOptions.map((option) => <option key={option.type} value={option.type}>{option.label}</option>)}</select></label>
+                      <label>결과 타입<select aria-label="정제 결과 타입" value={transformOutputType(previewField)} onChange={(event) => setTransformDraft((current) => current && ({ ...current, outputType: event.target.value as ColumnType }))}>{columnTypeOptions.map((option) => <option key={option.type} value={option.type} disabled={mustRemainNumeric && option.type !== "number"}>{option.label}</option>)}</select></label>
                     </div>
+                    {mustRemainNumeric && (
+                      <p className="transform-type-valid">
+                        {numericDependents.map((field) => field.name).join(", ")} 계산식에서 숫자로 사용 중이라 결과 타입을 유지합니다.
+                      </p>
+                    )}
                     {firstTypeIssue ? (
                       <p className="transform-type-error" role="alert">
                         {columnTypeLabel(transformOutputType(previewField))} 타입으로 저장할 수 없습니다. {firstTypeIssue.rowIndex + 1}행의 ‘{firstTypeIssue.value || "빈 값"}’이(가) 호환되지 않습니다. {typeIssues.length > 1 && `외 ${typeIssues.length - 1}건`}

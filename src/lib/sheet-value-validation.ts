@@ -4,6 +4,7 @@ export function normalizeStoredColumnType(type: string): SheetColumnType {
   const value = type.toLowerCase();
   if (value.includes("date") || value.includes("time")) return "date";
   if (value.includes("bool")) return "boolean";
+  if (value === "number") return "number";
   if (/int|numeric|decimal|real|double|money/.test(value)) return "number";
   return "text";
 }

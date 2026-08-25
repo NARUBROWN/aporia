@@ -7,6 +7,7 @@ import {
 } from "./sheet-value-validation";
 
 test("저장된 DB 타입을 데이터 시트 타입으로 변환한다", () => {
+  assert.equal(normalizeStoredColumnType("number"), "number");
   assert.equal(normalizeStoredColumnType("NUMERIC(18,4)"), "number");
   assert.equal(normalizeStoredColumnType("BOOLEAN"), "boolean");
   assert.equal(normalizeStoredColumnType("TIMESTAMP"), "date");
